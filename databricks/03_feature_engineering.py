@@ -157,12 +157,19 @@ except Exception as e:
 defaults = {c: 0.0 for c in HIST_COLS}
 labelled = outcomes.filter("is_open = 0")
 training = add_invoice_features(asof_join_history(labelled, timeline, defaults))
-training.cache()
+
+# Persist first, then validate what was written. .cache() is unavailable on serverless
+# (PERSIST TABLE is not supported), and asserting against the saved table is stronger
+# anyway: the guarantees then hold for the artifact Phase 5 reads, not for an
+# unmaterialised plan that could be recomputed differently.
+TRAINING_TABLE = f"{P.catalog}.{P.schema}.gold_training_dataset"
+(training.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(TRAINING_TABLE))
+training = spark.table(TRAINING_TABLE)
 
 n_invoices = labelled.count()
 n_training = training.count()
 print(f"invoices in  : {n_invoices:,}")
-print(f"rows out     : {n_training:,}")
+print(f"rows out     : {n_training:,}  -> {TRAINING_TABLE}")
 
 # COMMAND ----------
 
@@ -218,17 +225,16 @@ display(training.select(
 # MAGIC %md
 # MAGIC ## Training-ready dataset
 # MAGIC
-# MAGIC Written out for Phase 5. Note it is **not** split here — the chronological split belongs
-# MAGIC to training, and the timeline must be rebuilt from the train fold only when that happens.
-# MAGIC Building it from all of Silver, as this notebook does, is correct for *scoring* but would
-# MAGIC leak test outcomes into training features.
+# MAGIC Written above, before validation, and confirmed here.
+# MAGIC
+# MAGIC Note it is **not** split — the chronological split belongs to training, and the timeline
+# MAGIC must be rebuilt from the train fold only when that happens. Building it from all of
+# MAGIC Silver, as this notebook does, is correct for *scoring* but would leak test outcomes into
+# MAGIC training features. Phase 5 must not skip that step.
 
 # COMMAND ----------
 
-(training.write.mode("overwrite").option("overwriteSchema", "true")
- .saveAsTable(f"{P.catalog}.{P.schema}.gold_training_dataset"))
-
-print("wrote", f"{P.catalog}.{P.schema}.gold_training_dataset")
+print("training dataset:", TRAINING_TABLE, f"({training.count():,} rows)")
 display(training.limit(10))
 
 # COMMAND ----------
