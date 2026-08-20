@@ -143,16 +143,27 @@ def join_outcomes(invoices: DataFrame, payments: DataFrame) -> DataFrame:
 
 # --- Gold ---------------------------------------------------------------------
 
-def build_gold_customer_behavior(outcomes: DataFrame) -> DataFrame:
+def build_gold_customer_behavior(outcomes: DataFrame, as_of=None) -> DataFrame:
     """Descriptive per-customer aggregates for dashboards and segmentation.
 
     NOT model features - this is the full-history view by construction and would
     leak if fed to training. The model uses build_customer_timeline instead.
+
+    `as_of` anchors the recency windows. It is resolved to a scalar first rather
+    than computed with max().over(): Spark forbids a window function inside an
+    aggregate, and an unpartitioned window would also funnel every row through a
+    single partition.
     """
     paid = outcomes.filter(F.col("clear_date").isNotNull())
-    recent_90 = F.when(
-        F.col("clear_date") >= F.date_sub(F.max("clear_date").over(Window.partitionBy()), 90),
-        F.col("days_late"))
+    if as_of is None:
+        row = paid.agg(F.max("clear_date").alias("m")).first()
+        as_of = row["m"] if row is not None else None
+
+    def within(days, value):
+        if as_of is None:                     # no cleared invoices yet
+            return F.lit(None).cast("double")
+        return F.when(F.col("clear_date") >= F.date_sub(F.lit(as_of), days), value)
+
     return (paid.groupBy("customer_id")
             .agg(F.avg("days_late").alias("avg_days_late"),
                  F.stddev("days_late").alias("std_days_late"),
@@ -161,7 +172,9 @@ def build_gold_customer_behavior(outcomes: DataFrame) -> DataFrame:
                  F.count("*").alias("invoice_count"),
                  F.avg("invoice_amount").alias("avg_invoice_amount"),
                  F.max("days_late").alias("max_days_late"),
-                 F.avg(recent_90).alias("recent_90d_avg_days_late")))
+                 F.avg(within(90, F.col("days_late"))).alias("recent_90d_avg_days_late"),
+                 F.avg(within(30, (F.col("days_late") > 0).cast("double"))).alias("recent_30d_late_rate"))
+            .withColumn("as_of_date", F.lit(as_of)))
 
 
 # --- Feature table (point-in-time) --------------------------------------------

@@ -18,7 +18,8 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
 from transforms import (HIST_COLS, asof_join_history, build_customer_timeline,
-                        dedupe_events, join_outcomes, validate_invoices)
+                        build_gold_customer_behavior, dedupe_events, join_outcomes,
+                        validate_invoices)
 
 DEFAULTS = {c: 0.0 for c in HIST_COLS}
 
@@ -105,6 +106,37 @@ def test_one_row_per_invoice(spark):
     assert joined.count() == 3, "as-of join duplicated invoices"
     i3 = [r for r in joined.collect() if r["invoice_id"] == "i3"][0]
     assert i3["cust_invoice_count"] == 2.0, "i3 should see i1 and i2 only"
+
+
+def test_gold_recency_windows(spark):
+    """Regression: recency was computed with max().over(Window) inside avg(), which
+    Spark rejects ('window function inside an aggregate') and which also forces every
+    row through one partition."""
+    out = _outcomes(spark, [
+        ("A", "i1", date(2019, 12, 1), date(2019, 12, 22), date(2020, 1, 1), 100.0),   # 10 late, old
+        ("A", "i2", date(2020, 5, 1), date(2020, 5, 30), date(2020, 6, 1), 200.0),     # 2 late, recent
+        ("A", "i3", date(2020, 5, 20), date(2020, 6, 11), date(2020, 6, 15), 300.0),   # 4 late, recent
+    ])
+    g = build_gold_customer_behavior(out).collect()[0]      # as_of resolves to 2020-06-15
+
+    assert g["invoice_count"] == 3
+    assert abs(g["avg_days_late"] - 16.0 / 3) < 1e-6, g["avg_days_late"]
+    # 90-day window starts 2020-03-17, so only i2 and i3 count: (2 + 4) / 2
+    assert g["recent_90d_avg_days_late"] == 3.0, g["recent_90d_avg_days_late"]
+    # 30-day window starts 2020-05-16: i2 and i3, both late
+    assert g["recent_30d_late_rate"] == 1.0, g["recent_30d_late_rate"]
+    assert g["as_of_date"] == date(2020, 6, 15)
+
+
+def test_gold_respects_explicit_as_of(spark):
+    out = _outcomes(spark, [
+        ("A", "i1", date(2019, 12, 1), date(2019, 12, 22), date(2020, 1, 1), 100.0),
+        ("A", "i2", date(2020, 5, 1), date(2020, 5, 30), date(2020, 6, 1), 200.0),
+    ])
+    # Anchored far in the future, nothing falls inside the 90-day window.
+    g = build_gold_customer_behavior(out, as_of=date(2021, 1, 1)).collect()[0]
+    assert g["recent_90d_avg_days_late"] is None
+    assert g["invoice_count"] == 2, "lifetime aggregates must be unaffected by as_of"
 
 
 def test_dedupe_keeps_latest_ingestion(spark):
