@@ -43,6 +43,20 @@ HIST_COLS = ["cust_avg_days_late", "cust_std_days_late", "cust_invoice_count",
 MAX_PLAUSIBLE_AMOUNT = 100_000_000.0
 
 
+def safe_date(col):
+    """Parse to date, returning NULL on malformed input instead of raising.
+
+    Databricks serverless runs with spark.sql.ansi.enabled=true, where to_date()
+    THROWS on a bad string rather than returning NULL - which would kill the whole
+    pipeline on the first corrupt row, exactly the rows quarantine exists to catch.
+
+    try_to_date() is Databricks-only, so try_to_timestamp().cast(date) is used
+    instead: it is in OSS pyspark 3.5 as well, keeping the local tests faithful.
+    It also returns NULL for calendar-invalid dates like 2020-02-31.
+    """
+    return F.try_to_timestamp(col).cast("date")
+
+
 # --- Silver -------------------------------------------------------------------
 
 def dedupe_events(bronze: DataFrame) -> DataFrame:
@@ -66,8 +80,8 @@ def validate_invoices(events: DataFrame):
     report on them and they stay inspectable.
     """
     inv = (events.filter(F.col("event_type") == "invoice_created")
-           .withColumn("posting_date", F.to_date("posting_date"))
-           .withColumn("due_date", F.to_date("due_date")))
+           .withColumn("posting_date", safe_date("posting_date"))
+           .withColumn("due_date", safe_date("due_date")))
 
     reason = (F.when(F.col("invoice_id").isNull(), "null_invoice_id")
               .when(F.col("customer_id").isNull(), "null_customer_id")
@@ -86,7 +100,7 @@ def validate_invoices(events: DataFrame):
 
 def validate_payments(events: DataFrame):
     pay = (events.filter(F.col("event_type") == "invoice_paid")
-           .withColumn("clear_date", F.to_date("clear_date")))
+           .withColumn("clear_date", safe_date("clear_date")))
     reason = (F.when(F.col("invoice_id").isNull(), "null_invoice_id")
               .when(F.col("clear_date").isNull(), "unparseable_clear_date")
               .otherwise(None))

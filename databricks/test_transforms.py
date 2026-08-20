@@ -29,6 +29,11 @@ def spark_session():
             .master("local[2]")
             .config("spark.sql.shuffle.partitions", "2")
             .config("spark.ui.enabled", "false")
+            # Databricks serverless runs ANSI on; OSS pyspark defaults it off. Without
+            # this the local suite is a weaker test than production and silently misses
+            # cast failures - which is exactly how the to_date() crash reached the
+            # workspace despite green tests.
+            .config("spark.sql.ansi.enabled", "true")
             .getOrCreate())
 
 
@@ -124,6 +129,28 @@ def test_validation_quarantines_bad_rows(spark):
     assert reasons == {"due_before_posting", "null_amount", "unparseable_posting_date"}, reasons
 
 
+def test_malformed_dates_quarantine_instead_of_throwing(spark):
+    """Regression: under ANSI mode to_date() raises CAST_INVALID_INPUT rather than
+    returning NULL, which took down the whole Silver notebook on the first corrupt
+    row. These are the exact values the generator injects."""
+    df = spark.createDataFrame([
+        ("e1", "invoice_created", "i1", "c1", 100.0, "31/02/2020", "2020-03-01"),   # wrong format
+        ("e2", "invoice_created", "i2", "c1", 100.0, "2020-02-31", "2020-03-01"),   # no such day
+        ("e3", "invoice_created", "i3", "c1", 100.0, "not-a-date", "2020-03-01"),
+        ("e4", "invoice_created", "i4", "c1", 100.0, "2020-01-01", "garbage"),
+        ("e5", "invoice_created", "i5", "c1", 100.0, "2020-01-01", "2020-01-31"),   # good
+    ], "_event_id string, event_type string, invoice_id string, customer_id string, "
+       "invoice_amount double, posting_date string, due_date string")
+
+    clean, bad = validate_invoices(df)          # must not raise
+    assert clean.count() == 1, "only the well-formed row should survive"
+    got = {r["invoice_id"]: r["_reject_reason"] for r in bad.collect()}
+    assert got == {"i1": "unparseable_posting_date",
+                   "i2": "unparseable_posting_date",
+                   "i3": "unparseable_posting_date",
+                   "i4": "unparseable_due_date"}, got
+
+
 def test_join_outcomes_keeps_open_invoices(spark):
     inv = spark.createDataFrame(
         [("i1", "c1", date(2020, 1, 1), date(2020, 1, 31), 100.0),
@@ -147,6 +174,11 @@ if __name__ == "__main__":
             except AssertionError as e:
                 failed += 1
                 print(f"FAIL  {name}: {e}")
+            except Exception as e:
+                # A raised Spark error is a failure too - notably ANSI cast errors,
+                # which are the whole point of the malformed-date test.
+                failed += 1
+                print(f"ERROR {name}: {type(e).__name__}: {str(e).splitlines()[0][:110]}")
     spark.stop()
     print("\nAll point-in-time checks passed." if not failed else f"\n{failed} FAILED")
     sys.exit(1 if failed else 0)
