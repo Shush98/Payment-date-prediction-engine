@@ -196,7 +196,8 @@ def test_deferred_loader_returns_immediately():
 
         assert elapsed < 1.0, f"loader blocked for {elapsed:.1f}s - would stall worker boot"
         assert handle.source == "local_artifacts", "must serve something immediately"
-        assert "loading in background" in handle.as_dict()["fallback_reason"]
+        reason = handle.as_dict()["fallback_reason"]
+        assert "running" in reason and "for 0s" in reason, reason
 
         # And it must be usable right away, not just constructed.
         from src.features import FEATURE_COLS
@@ -213,6 +214,25 @@ def test_deferred_loader_returns_immediately():
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+
+
+def test_dead_loader_thread_is_reported_not_hidden():
+    """A thread that died without setting a result must not read as 'still loading'
+    forever - that looks identical to a slow load and hides the real failure."""
+    from src.model_source import DeferredPredictor, Predictor
+
+    handle = DeferredPredictor(Predictor("local_artifacts", "bundled", lambda df: None))
+    handle._thread = None                       # never started / already gone
+    assert "DIED SILENTLY" in handle.as_dict()["fallback_reason"]
+
+
+def test_failed_load_records_terminal_reason():
+    from src.model_source import DeferredPredictor, Predictor
+
+    handle = DeferredPredictor(Predictor("local_artifacts", "bundled", lambda df: None))
+    handle._fail("cat.sch.m@champion -> PermissionError: 403 (after 2.1s)")
+    reason = handle.as_dict()["fallback_reason"]
+    assert "403" in reason and "loading" not in reason, reason
 
 
 def test_deferred_predictor_swaps_under_lock():

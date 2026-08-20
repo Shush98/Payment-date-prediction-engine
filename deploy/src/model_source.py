@@ -17,6 +17,7 @@ corrected to pandas' 0=Monday convention precisely so a model could cross this b
 
 import os
 import threading
+import time
 import warnings
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -158,6 +159,9 @@ class DeferredPredictor:
     def __init__(self, initial: Predictor):
         self._predictor = initial
         self._lock = threading.Lock()
+        self._started = time.monotonic()
+        self._state = "loading"          # loading | active | failed
+        self._thread = None
 
     @property
     def source(self):
@@ -178,11 +182,29 @@ class DeferredPredictor:
 
     def as_dict(self):
         with self._lock:
-            return self._predictor.as_dict()
+            info = self._predictor.as_dict()
+            state, started = self._state, self._started
+
+        if state == "loading":
+            # Distinguish "still working" from "wedged". A load that has been running for
+            # minutes is hung on something HTTP timeouts do not cover (SDK auth, DNS),
+            # not merely slow - and that difference decides what to fix next.
+            elapsed = time.monotonic() - started
+            alive = self._thread.is_alive() if self._thread else False
+            info["fallback_reason"] = (
+                f"unity catalog load {'running' if alive else 'DIED SILENTLY'} "
+                f"for {elapsed:.0f}s")
+        return info
 
     def _swap(self, predictor: Predictor):
         with self._lock:
             self._predictor = predictor
+            self._state = "active"
+
+    def _fail(self, reason: str):
+        with self._lock:
+            self._predictor.fallback_reason = reason
+            self._state = "failed"
 
 
 def load_predictor_deferred(models: dict,
@@ -192,18 +214,23 @@ def load_predictor_deferred(models: dict,
     model_name = model_name or os.getenv("UC_MODEL_NAME", DEFAULT_MODEL_NAME)
     alias = alias or os.getenv("UC_MODEL_ALIAS", DEFAULT_ALIAS)
 
-    local = _load_local(models)
-    local.fallback_reason = f"{model_name}@{alias} -> loading in background"
-    handle = DeferredPredictor(local)
+    handle = DeferredPredictor(_load_local(models))
 
     def _upgrade():
-        uc, reason = _load_unity_catalog(model_name, alias)
+        started = time.monotonic()
+        try:
+            uc, reason = _load_unity_catalog(model_name, alias)
+        except BaseException as e:       # noqa: BLE001 - a dead thread must not look like a live one
+            uc, reason = None, f"loader thread crashed: {type(e).__name__}: {e}"
+
+        took = time.monotonic() - started
         if uc is not None:
             handle._swap(uc)
-            print(f"[model] upgraded to {uc.source} ({uc.version})")
+            print(f"[model] upgraded to unity_catalog ({uc.version}) in {took:.1f}s")
         else:
-            local.fallback_reason = f"{model_name}@{alias} -> {reason}"
-            print(f"[model] staying on local artifacts: {reason}")
+            handle._fail(f"{model_name}@{alias} -> {reason} (after {took:.1f}s)")
+            print(f"[model] staying on local artifacts after {took:.1f}s: {reason}")
 
-    threading.Thread(target=_upgrade, name="uc-model-load", daemon=True).start()
+    handle._thread = threading.Thread(target=_upgrade, name="uc-model-load", daemon=True)
+    handle._thread.start()
     return handle
