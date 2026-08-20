@@ -9,7 +9,10 @@ services:
     plan: free
     # The Flask app is self-contained in deploy/; Render treats this as the app root.
     rootDir: deploy
-    buildCommand: pip install -r requirements.txt
+    # The Unity Catalog model is fetched here, not at runtime: the free tier runs on
+    # 0.1 CPU where importing mlflow takes minutes, and the build step is allowed to be
+    # slow. fetch_model always exits 0 so a workspace problem cannot break the deploy.
+    buildCommand: pip install -r requirements.txt && python -m src.fetch_model
     # $PORT is injected by Render and is not fixed - binding a hardcoded port fails
     # health checks. One worker: the dataset and models load at import, so each extra
     # worker duplicates ~190MB against a 512MB free-tier limit.

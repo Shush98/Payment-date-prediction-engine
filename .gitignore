@@ -32,6 +32,9 @@ Thumbs.db
 # Scratch extract of the plan docx
 plan.txt
 
+# Model pulled from Unity Catalog during the build - never committed, always fetched
+deploy/artifacts/uc/
+
 # Claude Code local settings
 .claude/settings.local.json
 

@@ -20,6 +20,16 @@ from src.model_source import (COLUMN_ALIASES, UC_INPUT_COLS, Predictor, _load_lo
                               _uc_payload, load_predictor)
 
 
+class _PickleStub:
+    """Module level so joblib can pickle it into fixture files."""
+
+    def __init__(self, v):
+        self.v = v
+
+    def predict(self, X):
+        return np.full(len(X), self.v, dtype=float)
+
+
 def test_uc_input_cols_match_databricks():
     """The single source of truth is databricks/modeling.py RAW_INPUT_COLS."""
     from modeling import RAW_INPUT_COLS
@@ -335,6 +345,73 @@ def test_deferred_predictor_swaps_under_lock():
     assert handle.source == "unity_catalog"
     assert handle.version == "9"
     assert handle.as_dict()["source"] == "unity_catalog"
+
+
+def test_baked_model_is_used_and_needs_no_network():
+    """The build-time model must be served directly: no mlflow import, no thread, no
+    network. That is the whole point of fetching at build time."""
+    import json
+    import shutil
+    import tempfile
+    from pathlib import Path as _P
+
+    import joblib
+
+    import src.model_source as ms
+    from src.features import FEATURE_COLS
+
+    tmp = _P(tempfile.mkdtemp())
+    saved_dir = ms.BAKED_DIR
+    try:
+        # _PickleStub is module level: joblib cannot pickle a class defined in a function.
+        joblib.dump(_PickleStub(4.0), tmp / "model_mean.joblib")
+        joblib.dump(_PickleStub(9.0), tmp / "model_lower.joblib")   # crossed on purpose
+        joblib.dump(_PickleStub(1.0), tmp / "model_upper.joblib")
+        joblib.dump({"payment_terms": {"NAA8": 3}, "business_code": {"U001": 0}},
+                    tmp / "encoders.joblib")
+        (tmp / "uc_model.json").write_text(json.dumps({
+            "model_name": "cat.sch.payment_lateness", "alias": "champion",
+            "version": "5", "run_id": "abc", "feature_cols": list(FEATURE_COLS),
+            "fetched_at": "2026-08-21T00:00:00Z"}))
+        ms.BAKED_DIR = tmp
+
+        handle = ms.load_predictor_deferred({})       # no local models needed
+        assert handle.source == "unity_catalog", handle.as_dict()
+        assert handle.version == "5"
+        assert "baked at build" in handle.detail
+        assert handle._thread is None, "baked model must not spawn a loader thread"
+        assert "fallback_reason" not in handle.as_dict()
+
+        enriched = pd.DataFrame([{
+            **{c: 0.0 for c in FEATURE_COLS},
+            "cust_payment_terms": "NAA8", "business_code": "U001"}])
+        out = handle.score(enriched)
+        assert out.days_late_pred.iloc[0] == 4.0
+        # crossed quantiles must still come back ordered
+        assert out.days_late_lower.iloc[0] == 1.0
+        assert out.days_late_upper.iloc[0] == 9.0
+    finally:
+        ms.BAKED_DIR = saved_dir
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_missing_baked_model_falls_through_with_reason():
+    import tempfile
+    from pathlib import Path as _P
+
+    import src.model_source as ms
+
+    saved_dir = ms.BAKED_DIR
+    try:
+        ms.BAKED_DIR = _P(tempfile.mkdtemp())          # empty
+        class _S:
+            def predict(self, X): return np.zeros(len(X))
+        handle = ms.load_predictor_deferred(
+            {"model_mean": _S(), "model_lower": _S(), "model_upper": _S()})
+        assert handle.source == "local_artifacts"
+        assert "uc_model.json absent" in handle.as_dict()["fallback_reason"]
+    finally:
+        ms.BAKED_DIR = saved_dir
 
 
 def test_predictor_reports_provenance():

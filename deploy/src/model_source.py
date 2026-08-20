@@ -22,6 +22,8 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
@@ -44,6 +46,9 @@ COLUMN_ALIASES = {"cust_payment_terms": "payment_terms"}
 
 DEFAULT_MODEL_NAME = "workspace.payment_ops.payment_lateness"
 DEFAULT_ALIAS = "champion"
+
+# Where src/fetch_model.py writes the model it pulls from Unity Catalog at build time.
+BAKED_DIR = Path(__file__).resolve().parent.parent / "artifacts" / "uc"
 
 
 @dataclass
@@ -119,6 +124,53 @@ def _load_unity_catalog(model_name: str, alias: str):
         warnings.warn(f"Unity Catalog model unavailable ({reason}); "
                       "falling back to local artifacts")
         return None, reason
+
+
+def _encode(df: pd.DataFrame, encoders: dict) -> pd.DataFrame:
+    out = df.copy()
+    out["payment_terms_encoded"] = out["payment_terms"].map(encoders["payment_terms"]).fillna(-1).astype(int)
+    out["business_code_encoded"] = out["business_code"].map(encoders["business_code"]).fillna(-1).astype(int)
+    return out
+
+
+def _load_baked():
+    """The Unity Catalog model downloaded during the build (see src/fetch_model.py).
+
+    Plain joblib, so this costs no network call and does not import mlflow - which on a
+    0.1-CPU host is the difference between instant and several minutes.
+    """
+    import json
+
+    meta_path = BAKED_DIR / "uc_model.json"
+    if not meta_path.exists():
+        return None, "no build-time model (artifacts/uc/uc_model.json absent)"
+    try:
+        import joblib
+        from src.features import FEATURE_COLS
+
+        meta = json.loads(meta_path.read_text())
+        m_mean = joblib.load(BAKED_DIR / "model_mean.joblib")
+        m_lower = joblib.load(BAKED_DIR / "model_lower.joblib")
+        m_upper = joblib.load(BAKED_DIR / "model_upper.joblib")
+        encoders = joblib.load(BAKED_DIR / "encoders.joblib")
+
+        if list(meta.get("feature_cols", FEATURE_COLS)) != list(FEATURE_COLS):
+            return None, "baked model feature order differs from the app's FEATURE_COLS"
+
+        def score(enriched: pd.DataFrame) -> pd.DataFrame:
+            X = _encode(enriched.rename(columns=COLUMN_ALIASES), encoders)[FEATURE_COLS].to_numpy()
+            lower, upper = m_lower.predict(X), m_upper.predict(X)
+            return pd.DataFrame({
+                "days_late_pred": m_mean.predict(X),
+                "days_late_lower": np.minimum(lower, upper),
+                "days_late_upper": np.maximum(lower, upper),
+            }, index=enriched.index)
+
+        return Predictor("unity_catalog", meta["version"], score,
+                         detail=f"{meta['model_name']}@{meta['alias']} "
+                                f"baked at build {meta['fetched_at']}"), ""
+    except Exception as e:                  # noqa: BLE001
+        return None, f"baked model unreadable: {type(e).__name__}: {e}"
 
 
 def _load_local(models: dict) -> Predictor:
@@ -257,9 +309,12 @@ class DeferredPredictor:
                 stage = "not started yet"
             else:
                 stage = "running" if alive else "thread gone, will retry"
-            info["fallback_reason"] = (
-                f"unity catalog load {stage} for {elapsed:.0f}s "
-                f"(attempt {self._attempts}/{self.MAX_ATTEMPTS})")
+            status = (f"unity catalog load {stage} for {elapsed:.0f}s "
+                      f"(attempt {self._attempts}/{self.MAX_ATTEMPTS})")
+            # Keep the original reason. It says why the build-time model was not used,
+            # which is the more useful half - overwriting it hid that entirely.
+            base = info.get("fallback_reason", "")
+            info["fallback_reason"] = f"{base} | {status}" if base else status
         return info
 
     def _swap(self, predictor: Predictor):
@@ -276,16 +331,27 @@ class DeferredPredictor:
 def load_predictor_deferred(models: dict,
                             model_name: str = None,
                             alias: str = None) -> DeferredPredictor:
-    """Non-blocking. Returns the local model immediately.
+    """Non-blocking. Resolution order:
 
-    The Unity Catalog load is NOT started here - call ensure_started() from a request
-    handler. See DeferredPredictor.ensure_started for why import time is the wrong place.
+    1. The model baked in at build time by src/fetch_model.py - instant, no network.
+       This is the normal path in a deployed build.
+    2. Bundled joblib artifacts, while a live Unity Catalog load is attempted in the
+       background on first request. Only used when the build-time fetch did not happen,
+       e.g. running locally without credentials.
     """
     model_name = model_name or os.getenv("UC_MODEL_NAME", DEFAULT_MODEL_NAME)
     alias = alias or os.getenv("UC_MODEL_ALIAS", DEFAULT_ALIAS)
 
+    baked, baked_reason = _load_baked()
+    if baked is not None:
+        handle = DeferredPredictor(baked)
+        handle._state = "active"           # nothing to load, nothing to retry
+        return handle
+
+    local = _load_local(models)
+    local.fallback_reason = baked_reason
     return DeferredPredictor(
-        _load_local(models),
+        local,
         loader=lambda: _load_unity_catalog(model_name, alias),
         label=f"{model_name}@{alias}",
     )
