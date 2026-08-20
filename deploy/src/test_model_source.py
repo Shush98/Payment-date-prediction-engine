@@ -95,6 +95,70 @@ def test_local_scorer_returns_expected_shape():
     assert out.days_late_pred.tolist() == [4.0, 4.0, 4.0]
 
 
+def test_uc_sets_both_tracking_and_registry_uris():
+    """Regression: setting only the registry URI leaves MLflow resolving through the
+    default tracking store, which failed in production with
+    UnsupportedModelRegistryStoreURIException on a sqlite:// path.
+
+    mlflow is not installed locally, so a stub records the call order instead.
+    """
+    import os
+    import types
+
+    calls = []
+
+    class _Loaded:
+        def predict(self, df):
+            n = len(df)
+            return pd.DataFrame({"days_late_pred": [1.0] * n,
+                                 "days_late_lower": [0.0] * n,
+                                 "days_late_upper": [2.0] * n})
+
+    def _load_model(uri):
+        calls.append(("load", uri))
+        return _Loaded()
+
+    fake = types.ModuleType("mlflow")
+    fake.set_tracking_uri = lambda u: calls.append(("tracking", u))
+    fake.set_registry_uri = lambda u: calls.append(("registry", u))
+    fake.pyfunc = types.SimpleNamespace(load_model=_load_model)
+
+    tracking_mod = types.ModuleType("mlflow.tracking")
+    tracking_mod.MlflowClient = lambda: types.SimpleNamespace(
+        get_model_version_by_alias=lambda n, a: types.SimpleNamespace(version="7"))
+    fake.tracking = tracking_mod
+
+    saved_mods = {k: sys.modules.get(k) for k in ("mlflow", "mlflow.tracking")}
+    saved_env = {k: os.environ.get(k) for k in ("DATABRICKS_HOST", "DATABRICKS_TOKEN")}
+    sys.modules["mlflow"], sys.modules["mlflow.tracking"] = fake, tracking_mod
+    os.environ["DATABRICKS_HOST"], os.environ["DATABRICKS_TOKEN"] = "https://x", "tok"
+    try:
+        from src.model_source import _load_unity_catalog
+        pred, reason = _load_unity_catalog("cat.sch.payment_lateness", "champion")
+
+        assert reason == "", f"unexpected failure: {reason}"
+        assert pred is not None and pred.source == "unity_catalog"
+        assert pred.version == "7"
+
+        assert ("tracking", "databricks") in calls, "tracking URI never set"
+        assert ("registry", "databricks-uc") in calls, "registry URI never set"
+        load_at = next(i for i, c in enumerate(calls) if c[0] == "load")
+        assert calls.index(("tracking", "databricks")) < load_at, "tracking URI set too late"
+        assert calls.index(("registry", "databricks-uc")) < load_at, "registry URI set too late"
+        assert calls[load_at][1] == "models:/cat.sch.payment_lateness@champion"
+    finally:
+        for k, v in saved_mods.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 def test_predictor_reports_provenance():
     p = Predictor("unity_catalog", "3", lambda df: df, detail="models:/x@champion")
     assert p.as_dict() == {"source": "unity_catalog", "version": "3",

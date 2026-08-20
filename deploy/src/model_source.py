@@ -76,7 +76,13 @@ def _load_unity_catalog(model_name: str, alias: str):
         import mlflow
         from mlflow.tracking import MlflowClient
 
+        # BOTH are required. set_registry_uri alone is not enough: MLflow resolves the
+        # registry through the tracking URI, so without set_tracking_uri("databricks")
+        # it falls back to a local store and fails with
+        # UnsupportedModelRegistryStoreURIException on a sqlite:// path.
+        mlflow.set_tracking_uri("databricks")
         mlflow.set_registry_uri("databricks-uc")
+
         uri = f"models:/{model_name}@{alias}"
         model = mlflow.pyfunc.load_model(uri)
 
