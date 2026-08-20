@@ -1,0 +1,31 @@
+# Render blueprint. Committing it means the deployment config is versioned and
+# reviewable rather than living only in the dashboard.
+#
+# Deploy: Render -> New -> Blueprint -> pick this repo.
+services:
+  - type: web
+    name: payment-decision-engine
+    runtime: python
+    plan: free
+    # The Flask app is self-contained in deploy/; Render treats this as the app root.
+    rootDir: deploy
+    buildCommand: pip install -r requirements.txt
+    # $PORT is injected by Render and is not fixed - binding a hardcoded port fails
+    # health checks. One worker: the dataset and models load at import, so each extra
+    # worker duplicates ~190MB against a 512MB free-tier limit.
+    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 1 --timeout 300 --access-logfile - app:app
+    healthCheckPath: /health
+    envVars:
+      # Pinned because the artifacts were pickled under 3.14-compatible libraries and
+      # sklearn unpickling is version-sensitive.
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      # sync:false = set these in the Render dashboard, never committed.
+      - key: DATABRICKS_HOST
+        sync: false
+      - key: DATABRICKS_TOKEN
+        sync: false
+      - key: UC_MODEL_NAME
+        sync: false
+      - key: UC_MODEL_ALIAS
+        sync: false

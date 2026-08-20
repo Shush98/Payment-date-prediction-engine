@@ -1,13 +1,3 @@
----
-title: B2B Payment Risk & Collection Decision Engine
-emoji: 📊
-colorFrom: blue
-colorTo: indigo
-sdk: docker
-app_port: 7860
-pinned: false
----
-
 # B2B Payment Risk & Collection Decision Engine
 
 Predicts when B2B invoices will be paid, then decides **which invoices a capacity-limited
@@ -51,8 +41,8 @@ demoted to REMIND rather than dropped.
   unreachable. Reported rather than hidden, so a silent fallback never masquerades as
   the live model.
 
-To enable the Unity Catalog path, set these as **Space secrets**
-(Settings → Variables and secrets):
+To enable the Unity Catalog path, set these as environment variables in the
+**Render dashboard** (Service → Environment):
 
 | Secret | Value |
 |---|---|
@@ -83,6 +73,17 @@ python app.py          # http://localhost:5000
 ```
 
 Without `DATABRICKS_*` env vars it uses the bundled artifacts — no workspace needed.
+
+## Deployment
+
+Hosted on Render's free tier via `../render.yaml`. Two things to expect:
+
+- **Cold starts.** Free instances sleep after ~15 minutes idle. The first request after
+  that waits ~50s for the instance, plus ~10s while the app loads the dataset and models
+  at import. Subsequent requests are fast.
+- **Memory.** Peak resident is ~190 MB against the 512 MB free limit, measured across
+  startup and a full 10k-invoice scoring pass. Gunicorn runs a single worker on purpose:
+  the dataset loads at import, so each extra worker would duplicate that footprint.
 
 ## Source
 

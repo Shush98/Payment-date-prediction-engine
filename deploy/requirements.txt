@@ -1,9 +1,14 @@
-flask
-gunicorn
-scikit-learn
-pandas
-numpy
-joblib
+# scikit-learn is pinned because artifacts/*.joblib were pickled by this version.
+# An unpinned install can silently unpickle into a different estimator layout, or warn
+# and then misbehave. Retrain via `python -m src.train` if you change it.
+scikit-learn==1.8.0
+numpy==2.3.5
+pandas==2.3.3
+joblib==1.5.3
+
+flask==3.1.3
+gunicorn==23.0.0
+
 # Unity Catalog model loading. If the workspace is unreachable the app still serves,
 # falling back to the bundled joblib artifacts (see src/model_source.py).
 mlflow-skinny[databricks]
