@@ -255,6 +255,54 @@ def test_ensure_started_revives_a_vanished_thread():
     assert "nope" in handle.as_dict()["fallback_reason"]
 
 
+def test_hung_load_goes_terminal_after_timeout():
+    """A load still running past the deadline must stop reporting progress. Python
+    cannot kill the thread, but /health must not imply work that is not happening."""
+    import threading as _th
+    import time as _t
+    from src.model_source import DeferredPredictor, Predictor
+
+    stop = _th.Event()
+    handle = DeferredPredictor(Predictor("local_artifacts", "bundled", lambda df: None),
+                               loader=lambda: (stop.wait(30), (None, "never"))[1],
+                               label="m@champion")
+    handle.ensure_started()
+    try:
+        for _ in range(50):
+            if handle._thread and handle._thread.is_alive():
+                break
+            _t.sleep(0.02)
+        # Pretend the deadline has passed.
+        handle._started = _t.monotonic() - (DeferredPredictor.LOAD_TIMEOUT_SECONDS + 5)
+        reason = handle.as_dict()["fallback_reason"]
+        assert "timed out after" in reason, reason
+        assert "DATABRICKS_AUTH_TYPE=pat" in reason, "must say how to fix it"
+        assert handle._state == "failed"
+    finally:
+        stop.set()
+
+
+def test_auth_type_is_pinned_when_token_present():
+    """Regression: the SDK credential chain probes instance metadata and hangs."""
+    import os
+    from src.model_source import _load_unity_catalog
+
+    saved = {k: os.environ.get(k) for k in
+             ("DATABRICKS_HOST", "DATABRICKS_TOKEN", "DATABRICKS_AUTH_TYPE")}
+    os.environ["DATABRICKS_HOST"] = "https://x"
+    os.environ["DATABRICKS_TOKEN"] = "tok"
+    os.environ.pop("DATABRICKS_AUTH_TYPE", None)
+    try:
+        _load_unity_catalog("cat.sch.m", "champion")     # mlflow absent -> returns a reason
+        assert os.environ.get("DATABRICKS_AUTH_TYPE") == "pat"
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 def test_retry_attempts_are_capped():
     from src.model_source import DeferredPredictor, Predictor
 

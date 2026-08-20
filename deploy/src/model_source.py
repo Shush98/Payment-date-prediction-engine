@@ -79,6 +79,13 @@ def _load_unity_catalog(model_name: str, alias: str):
     missing = [v for v in ("DATABRICKS_HOST", "DATABRICKS_TOKEN") if not os.getenv(v)]
     if missing:
         return None, f"{' and '.join(missing)} not set"
+
+    # Pin the auth method. Given only a token, the Databricks SDK still walks its whole
+    # credential chain - OAuth, cloud CLIs, and instance metadata services. On a hosted
+    # box the metadata probe has no useful timeout and the load hangs for minutes.
+    # We have a PAT; say so and skip the search.
+    os.environ.setdefault("DATABRICKS_AUTH_TYPE", "pat")
+
     try:
         import mlflow
         from mlflow.tracking import MlflowClient
@@ -157,6 +164,10 @@ class DeferredPredictor:
     """
 
     MAX_ATTEMPTS = 3
+    # A load still running past this is wedged, not slow. Python cannot kill a thread,
+    # so the orphan is left to die with the process - but the state goes terminal so
+    # /health stops implying progress that is not happening.
+    LOAD_TIMEOUT_SECONDS = 90
 
     def __init__(self, initial: Predictor, loader=None, label=""):
         self._predictor = initial
@@ -233,11 +244,15 @@ class DeferredPredictor:
             state, started = self._state, self._started
 
         if state == "loading":
-            # Distinguish "still working" from "wedged". A load running for minutes is
-            # hung on something HTTP timeouts do not cover (SDK auth, DNS), not slow -
-            # and that difference decides what to fix next.
             elapsed = time.monotonic() - started
             alive = self._thread.is_alive() if self._thread else False
+
+            if alive and elapsed > self.LOAD_TIMEOUT_SECONDS:
+                self._fail(f"{self._label} -> timed out after {elapsed:.0f}s "
+                           "(hung, not slow - usually the Databricks SDK credential "
+                           "chain; set DATABRICKS_AUTH_TYPE=pat)")
+                return self.as_dict()
+
             if self._thread is None:
                 stage = "not started yet"
             else:
