@@ -166,6 +166,54 @@ def business_metrics(df: pd.DataFrame, lower, upper, capacity=DAILY_CAPACITY) ->
     }
 
 
+def population_stability_index(reference, current, bins=10) -> float:
+    """PSI between a reference and a current distribution.
+
+    Bin edges come from the REFERENCE (training) quantiles, so the question asked is
+    "where does today's traffic fall relative to what the model was fitted on".
+    Re-binning on the current data would hide exactly the shift being looked for.
+
+    Convention: < 0.1 stable, 0.1-0.25 moderate, > 0.25 significant.
+    """
+    ref = np.asarray(reference, dtype=float)
+    cur = np.asarray(current, dtype=float)
+    ref, cur = ref[np.isfinite(ref)], cur[np.isfinite(cur)]
+    if len(ref) == 0 or len(cur) == 0:
+        return float("nan")
+
+    edges = np.unique(np.quantile(ref, np.linspace(0, 1, bins + 1)))
+    if len(edges) < 3:                      # near-constant reference, nothing to compare
+        return 0.0
+    edges[0], edges[-1] = -np.inf, np.inf
+
+    eps = 1e-6
+    r = np.clip(np.histogram(ref, edges)[0] / len(ref), eps, None)
+    c = np.clip(np.histogram(cur, edges)[0] / len(cur), eps, None)
+    return float(np.sum((c - r) * np.log(c / r)))
+
+
+def categorical_psi(reference, current) -> float:
+    """PSI over category shares. Categories absent from one side get a floor rather
+    than being dropped, so a category appearing for the first time still registers."""
+    r = pd.Series(list(reference)).value_counts(normalize=True)
+    c = pd.Series(list(current)).value_counts(normalize=True)
+    if r.empty or c.empty:
+        return float("nan")
+    idx = r.index.union(c.index)
+    eps = 1e-6
+    r = r.reindex(idx).fillna(0.0).clip(lower=eps)
+    c = c.reindex(idx).fillna(0.0).clip(lower=eps)
+    return float(((c - r) * np.log(c / r)).sum())
+
+
+def drift_label(psi) -> str:
+    if not np.isfinite(psi):
+        return "unknown"
+    if psi < 0.1:
+        return "stable"
+    return "moderate" if psi < 0.25 else "significant"
+
+
 class PaymentLatenessModel:
     """Bundles the three quantile models *and their encoders* behind one predict() call.
 

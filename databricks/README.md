@@ -15,6 +15,7 @@ Gold aggregates → **point-in-time feature table**.
 | 5 | `04_model_training.py` | Chronological split, 3 quantile models, MLflow, UC registry |
 | 6 | `05_batch_inference.py` | Scores the open book into an append-only prediction log |
 | 7 | `06_decision_engine.py` | EV ranking + capacity constraint → collection queue |
+| 8 | `07_monitoring.py` | Delayed-label join, performance after outcomes, PSI drift |
 
 Re-run 1→4 to add more data. Steps 2–4 are idempotent; step 2 adds zero rows if no new files
 arrived, which is the checkpoint working.

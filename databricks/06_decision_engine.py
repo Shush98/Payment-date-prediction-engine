@@ -68,7 +68,11 @@ for k in ["CALL_COST", "DAYS_ACCELERATED", "DAILY_CAPITAL_RATE", "DAILY_CAPACITY
 
 from pyspark.sql import Window
 
+# Only genuinely open invoices belong in a work order. The log also holds `backtest`
+# rows - closed invoices re-scored to give Phase 8 real labels - and queueing those
+# would tell the team to chase invoices that were already paid.
 latest = (spark.table(PREDICTIONS)
+          .filter(F.col("scoring_mode") == "open")
           .withColumn("_rn", F.row_number().over(
               Window.partitionBy("invoice_id").orderBy(F.col("scored_at").desc())))
           .filter(F.col("_rn") == 1).drop("_rn"))

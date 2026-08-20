@@ -24,6 +24,7 @@
 dbutils.widgets.text("catalog", "workspace")
 dbutils.widgets.text("schema", "payment_ops")
 dbutils.widgets.text("model_alias", "champion")
+dbutils.widgets.dropdown("score_scope", "both", ["open", "backtest", "both"])
 
 # COMMAND ----------
 
@@ -87,26 +88,51 @@ for k, v in defaults.items():
 # COMMAND ----------
 
 outcomes = spark.table(P.table("silver_outcomes"))
-open_sdf = outcomes.filter("is_open = 1")
 timeline = build_customer_timeline(outcomes)          # all cleared invoices - correct at scoring time
 
-scored_sdf = add_invoice_features(asof_join_history(open_sdf, timeline, defaults))
-score_pdf = scored_sdf.select(
-    "invoice_id", "customer_id", "customer_name", "invoice_amount",
-    "posting_date", "due_date", *RAW_INPUT_COLS
-).toPandas()
+# --- what to score -----------------------------------------------------------------
+# `open`     the real open book. These invoices never clear in this dataset, so they
+#            can never produce a label - useful for the queue, useless for monitoring.
+# `backtest` invoices from the model's held-out test window. They are closed, so their
+#            real payment outcome supplies a GENUINE delayed label for Phase 8. Features
+#            still come from the as-of join, so nothing later than posting_date is used.
+# Fabricating payments for the open book would fill the dashboard with numbers measuring
+# invented data - see the plan's "do not present simulated results as observed" rule.
+SCOPE = dbutils.widgets.get("score_scope")
+cutoff = pd.Timestamp(run.data.params["cutoff_date"]).date()
 
+frames = []
+if SCOPE in ("open", "both"):
+    frames.append(("open", outcomes.filter("is_open = 1")))
+if SCOPE in ("backtest", "both"):
+    frames.append(("backtest", outcomes.filter(
+        (F.col("is_open") == 0) & (F.col("posting_date") >= F.lit(cutoff)))))
+
+parts = []
+for mode, sdf in frames:
+    feat = add_invoice_features(asof_join_history(sdf, timeline, defaults))
+    pdf_part = feat.select("invoice_id", "customer_id", "customer_name", "invoice_amount",
+                           "posting_date", "due_date", *RAW_INPUT_COLS).toPandas()
+    pdf_part["scoring_mode"] = mode
+    print(f"  {mode:<9} {len(pdf_part):>7,} invoices")
+    parts.append(pdf_part)
+
+score_pdf = pd.concat(parts, ignore_index=True)
 for col in ("posting_date", "due_date"):
     score_pdf[col] = pd.to_datetime(score_pdf[col])
 
-print(f"open invoices to score: {len(score_pdf):,}")
+print(f"\ntotal to score: {len(score_pdf):,}   (model test window starts {cutoff})")
 print("cold-start (no prior cleared history):", int((score_pdf.cust_invoice_count == 0).sum()))
 
 # COMMAND ----------
 
-assert len(score_pdf) > 0, "no open invoices - run simulation/invoice_stream.py for more batches"
+assert len(score_pdf) > 0, "nothing to score - run simulation/invoice_stream.py for more batches"
 missing = [c for c in RAW_INPUT_COLS if c not in score_pdf.columns]
 assert not missing, f"missing model inputs: {missing}"
+if SCOPE in ("open", "both"):
+    assert (score_pdf.scoring_mode == "open").sum() > 0, (
+        "no OPEN invoices - the generator emits in posting-date order and the open book is "
+        "the most recent ~10k rows; raise batches x batch_size and re-run 01-03")
 
 # COMMAND ----------
 
@@ -125,7 +151,8 @@ print(preds.describe().round(2).to_string())
 # COMMAND ----------
 
 log = score_pdf[["invoice_id", "customer_id", "customer_name", "invoice_amount",
-                 "posting_date", "due_date", "cust_std_days_late", "cust_invoice_count"]].copy()
+                 "posting_date", "due_date", "cust_std_days_late", "cust_invoice_count",
+                 "amount_log", "payment_terms", "business_code", "scoring_mode"]].copy()
 log["days_late_pred"] = preds["days_late_pred"].to_numpy()
 log["days_late_lower"] = preds["days_late_lower"].to_numpy()
 log["days_late_upper"] = preds["days_late_upper"].to_numpy()

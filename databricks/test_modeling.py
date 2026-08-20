@@ -14,8 +14,10 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "deploy"))
 
 from modeling import (DEFAULT_KEYS, FEATURE_COLS, RAW_INPUT_COLS, PaymentLatenessModel,
-                      apply_encoders, build_encoders, business_metrics, chronological_split,
-                      expected_value, late_classification_auc, model_metrics, p_late, p_responds)
+                      apply_encoders, build_encoders, business_metrics, categorical_psi,
+                      chronological_split, drift_label, expected_value,
+                      late_classification_auc, model_metrics, p_late, p_responds,
+                      population_stability_index)
 
 
 def test_feature_cols_match_flask_app():
@@ -103,6 +105,52 @@ def test_business_metrics_prefers_ev_ranking():
     assert b["ev_decision_engine"] >= b["ev_by_amount"]
     assert b["ev_decision_engine"] >= b["ev_random"]
     assert b["ev_uplift_vs_by_amount"] == b["ev_decision_engine"] - b["ev_by_amount"]
+
+
+def test_psi_is_zero_for_identical_distributions():
+    rng = np.random.default_rng(0)
+    x = rng.normal(0, 1, 5000)
+    assert population_stability_index(x, x) < 0.01
+    # Same distribution, different sample -> still stable
+    assert population_stability_index(x, rng.normal(0, 1, 5000)) < 0.1
+
+
+def test_psi_detects_a_real_shift():
+    rng = np.random.default_rng(1)
+    ref = rng.normal(0, 1, 5000)
+    assert drift_label(population_stability_index(ref, rng.normal(0, 1, 5000))) == "stable"
+    assert population_stability_index(ref, rng.normal(2.0, 1, 5000)) > 0.25
+    assert drift_label(population_stability_index(ref, rng.normal(2.0, 1, 5000))) == "significant"
+
+
+def test_psi_uses_reference_bins_not_current():
+    """Binning on the current data would normalise away the very shift being measured."""
+    rng = np.random.default_rng(2)
+    ref = rng.normal(0, 1, 5000)
+    shifted = rng.normal(0, 1, 5000) + 5.0
+    assert population_stability_index(ref, shifted) > 1.0, "large shift must not be absorbed"
+
+
+def test_psi_handles_degenerate_input():
+    assert population_stability_index([], [1, 2, 3]) != population_stability_index([], [])  # both nan-safe
+    assert np.isnan(population_stability_index([], [1, 2, 3]))
+    assert population_stability_index([5.0] * 100, [5.0] * 100) == 0.0, "constant reference"
+
+
+def test_categorical_psi_flags_new_and_vanishing_categories():
+    ref = ["A"] * 60 + ["B"] * 40
+    assert categorical_psi(ref, ["A"] * 60 + ["B"] * 40) < 0.01
+    # A category that never appeared in training shows up as a third of traffic
+    assert categorical_psi(ref, ["A"] * 40 + ["B"] * 27 + ["C"] * 33) > 0.25
+    # An expected category disappears entirely
+    assert categorical_psi(ref, ["A"] * 100) > 0.25
+
+
+def test_drift_label_thresholds():
+    assert drift_label(0.05) == "stable"
+    assert drift_label(0.15) == "moderate"
+    assert drift_label(0.9) == "significant"
+    assert drift_label(float("nan")) == "unknown"
 
 
 class _Stub:
