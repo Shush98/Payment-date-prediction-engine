@@ -58,6 +58,41 @@ def test_timeline_is_cumulative(spark):
     assert tl[date(2020, 4, 30)]["cust_avg_days_late"] == 46.0   # (90 + 2) / 2
 
 
+def test_same_day_clears_collapse_to_one_row(spark):
+    """(customer_id, clear_date) must be unique - it is the feature table's primary key.
+    Several invoices clearing on the same day previously produced one row each, which
+    UC rejects and which made the as-of join's tie-break arbitrary."""
+    out = _outcomes(spark, [
+        ("A", "i1", date(2020, 1, 1), date(2020, 2, 1), date(2020, 3, 1), 100.0),   # 29 late
+        ("A", "i2", date(2020, 1, 5), date(2020, 2, 25), date(2020, 3, 1), 300.0),  # 5 late, same day
+        ("A", "i3", date(2020, 1, 9), date(2020, 4, 1), date(2020, 4, 3), 200.0),   # 2 late
+    ])
+    tl = build_customer_timeline(out)
+
+    keys = [(r["customer_id"], r["clear_date"]) for r in tl.collect()]
+    assert len(keys) == len(set(keys)), f"non-unique primary key: {keys}"
+    assert len(keys) == 2, f"expected one row per clear_date, got {len(keys)}"
+
+    # The surviving 2020-03-01 row must reflect BOTH of that day's payments.
+    day1 = [r for r in tl.collect() if r["clear_date"] == date(2020, 3, 1)][0]
+    assert day1["cust_invoice_count"] == 2.0, day1["cust_invoice_count"]
+    assert day1["cust_avg_days_late"] == 17.0, day1["cust_avg_days_late"]   # (29 + 5) / 2
+    assert day1["cust_max_late"] == 29.0
+
+
+def test_asof_uses_fully_settled_same_day_state(spark):
+    """A later invoice must see all of a prior day's payments, not just the first."""
+    out = _outcomes(spark, [
+        ("A", "i1", date(2020, 1, 1), date(2020, 2, 1), date(2020, 3, 1), 100.0),
+        ("A", "i2", date(2020, 1, 5), date(2020, 2, 25), date(2020, 3, 1), 300.0),
+        ("A", "i3", date(2020, 6, 1), date(2020, 7, 1), date(2020, 7, 2), 200.0),
+    ])
+    joined = asof_join_history(out, build_customer_timeline(out), DEFAULTS)
+    i3 = [r for r in joined.collect() if r["invoice_id"] == "i3"][0]
+    assert i3["cust_invoice_count"] == 2.0, "undercounted same-day history"
+    assert i3["cust_avg_days_late"] == 17.0
+
+
 def test_invoice_never_sees_its_own_outcome(spark):
     out = _outcomes(spark, [
         ("A", "i1", date(2020, 1, 1), date(2020, 1, 31), date(2020, 4, 30), 100.0),

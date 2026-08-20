@@ -191,15 +191,27 @@ def build_customer_timeline(outcomes: DataFrame) -> DataFrame:
     paid = outcomes.filter(F.col("clear_date").isNotNull())
     w = (Window.partitionBy("customer_id").orderBy("clear_date")
          .rowsBetween(Window.unboundedPreceding, Window.currentRow))
-    return (paid
-            .select("customer_id", "clear_date", "days_late", "invoice_amount")
-            .withColumn("cust_avg_days_late", F.avg("days_late").over(w))
-            .withColumn("cust_std_days_late", F.coalesce(F.stddev("days_late").over(w), F.lit(0.0)))
-            .withColumn("cust_invoice_count", F.count("days_late").over(w).cast("double"))
-            .withColumn("cust_min_late", F.min("days_late").over(w).cast("double"))
-            .withColumn("cust_max_late", F.max("days_late").over(w).cast("double"))
-            .withColumn("cust_avg_amount", F.avg("invoice_amount").over(w))
-            .drop("days_late", "invoice_amount"))
+    running = (paid
+               .select("customer_id", "clear_date", "days_late", "invoice_amount")
+               .withColumn("cust_avg_days_late", F.avg("days_late").over(w))
+               .withColumn("cust_std_days_late", F.coalesce(F.stddev("days_late").over(w), F.lit(0.0)))
+               .withColumn("cust_invoice_count", F.count("days_late").over(w).cast("double"))
+               .withColumn("cust_min_late", F.min("days_late").over(w).cast("double"))
+               .withColumn("cust_max_late", F.max("days_late").over(w).cast("double"))
+               .withColumn("cust_avg_amount", F.avg("invoice_amount").over(w))
+               .drop("days_late", "invoice_amount"))
+
+    # A customer can have several invoices clear on the same day, which would make
+    # (customer_id, clear_date) non-unique - rejected as a feature-table primary key,
+    # and worse, it made asof_join_history's tie-break arbitrary: it could pick the
+    # state after the first of the day's payments and silently undercount history.
+    # Keep the last row of each day, i.e. the state once all of it has settled.
+    settled = (Window.partitionBy("customer_id", "clear_date")
+               .orderBy(F.col("cust_invoice_count").desc()))
+    return (running
+            .withColumn("_r", F.row_number().over(settled))
+            .filter(F.col("_r") == 1)
+            .drop("_r"))
 
 
 def asof_join_history(invoices: DataFrame, timeline: DataFrame, defaults: dict) -> DataFrame:
