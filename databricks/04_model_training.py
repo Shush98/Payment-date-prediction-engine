@@ -114,7 +114,15 @@ KEEP = FEATURE_COLS + ["payment_terms", "business_code", "invoice_amount",
                        "cust_std_days_late", "posting_date", "days_late", "invoice_id"]
 train_pdf = f_train.select(*[c for c in dict.fromkeys(KEEP) if c in f_train.columns]).toPandas()
 test_pdf = f_test.select(*[c for c in dict.fromkeys(KEEP) if c in f_test.columns]).toPandas()
+
+# toPandas() maps Spark DateType to python datetime.date objects (object dtype), not
+# datetime64. Normalise once here so downstream code can rely on Timestamp semantics
+# rather than each caller guessing which it got.
+for _pdf in (train_pdf, test_pdf):
+    _pdf["posting_date"] = pd.to_datetime(_pdf["posting_date"])
+
 print(f"train {train_pdf.shape}   test {test_pdf.shape}")
+print("posting_date dtype:", train_pdf.posting_date.dtype)
 
 # COMMAND ----------
 
