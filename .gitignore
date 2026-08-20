@@ -29,6 +29,9 @@ Thumbs.db
 # Test cache
 .pytest_cache/
 
+# Scratch extract of the plan docx
+plan.txt
+
 # Claude Code local settings
 .claude/settings.local.json
 

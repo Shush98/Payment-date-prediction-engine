@@ -14,9 +14,10 @@ def load_models():
         "model_mean":       joblib.load(ARTIFACTS_DIR / "model_mean.joblib"),
         "model_lower":      joblib.load(ARTIFACTS_DIR / "model_lower.joblib"),
         "model_upper":      joblib.load(ARTIFACTS_DIR / "model_upper.joblib"),
-        "label_encoders":   joblib.load(ARTIFACTS_DIR / "label_encoders.joblib"),
-        "customer_history": joblib.load(ARTIFACTS_DIR / "customer_history.joblib"),
-        "global_defaults":  joblib.load(ARTIFACTS_DIR / "global_defaults.joblib"),
+        "label_encoders":    joblib.load(ARTIFACTS_DIR / "label_encoders.joblib"),
+        "customer_timeline": joblib.load(ARTIFACTS_DIR / "customer_timeline.joblib"),
+        "customer_history":  joblib.load(ARTIFACTS_DIR / "customer_history.joblib"),
+        "global_defaults":   joblib.load(ARTIFACTS_DIR / "global_defaults.joblib"),
     }
 
 
@@ -32,7 +33,7 @@ def predict(df, models):
     enriched = add_features(
         df,
         models["label_encoders"],
-        models["customer_history"],
+        models["customer_timeline"],
         models["global_defaults"],
     )
 
