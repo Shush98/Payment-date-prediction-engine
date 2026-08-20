@@ -27,6 +27,7 @@ All notebooks take `catalog` and `schema` widgets, defaulting to `workspace` / `
 | One active pipeline per type | Plain notebooks + Workflows rather than Declarative Pipelines |
 | One `2X-Small` SQL warehouse | Dashboards query pre-aggregated Gold, never raw Bronze |
 | **Online Feature Store unsupported** | Feature lookups are offline/batch. Do not claim real-time feature serving |
+| Serverless is not the ML Runtime | `databricks-feature-engineering` needs `%pip install`; notebook 03 falls back to plain Delta if unavailable |
 | Outbound internet restricted | No external API calls from notebooks |
 | Spark Connect only | DataFrame API only — no RDD APIs, no global temp views |
 

@@ -23,6 +23,13 @@ dbutils.widgets.text("schema", "payment_ops")
 
 # COMMAND ----------
 
+# Picks up edits to transforms.py / config.py after a git pull. Without it the
+# session keeps using the module version imported on the first run.
+%load_ext autoreload
+%autoreload 2
+
+# COMMAND ----------
+
 import os, sys
 
 if os.getcwd() not in sys.path:

@@ -27,6 +27,34 @@ dbutils.widgets.text("schema", "payment_ops")
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ## Optional: Feature Engineering client
+# MAGIC
+# MAGIC Serverless is not the ML Runtime, so `databricks.feature_engineering` is not
+# MAGIC preinstalled. Installing it registers the timeline as a **Unity Catalog time-series
+# MAGIC feature table**, which makes point-in-time lookups a property of the table rather than
+# MAGIC something each training script must remember.
+# MAGIC
+# MAGIC If the install fails (Free Edition restricts outbound traffic), skip this cell — the
+# MAGIC notebook falls back to a plain Delta table and everything downstream still works. You
+# MAGIC lose managed lineage, not correctness.
+# MAGIC
+# MAGIC `%pip install` restarts Python, so this must stay the **first executed cell**.
+
+# COMMAND ----------
+
+# MAGIC %pip install databricks-feature-engineering
+
+# COMMAND ----------
+
+# Databricks caches imported modules for the life of the Python process, so a
+# `git pull` alone does NOT pick up edits to transforms.py / config.py. Without
+# this you re-run the notebook and get the identical error from the old code.
+%load_ext autoreload
+%autoreload 2
+
+# COMMAND ----------
+
 import os, sys
 
 if os.getcwd() not in sys.path:

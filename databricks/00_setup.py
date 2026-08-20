@@ -16,6 +16,12 @@ dbutils.widgets.text("schema", "payment_ops")
 
 # COMMAND ----------
 
+# Picks up edits to config.py after a git pull.
+%load_ext autoreload
+%autoreload 2
+
+# COMMAND ----------
+
 import sys, os
 
 # In a Databricks Git folder the notebook's own directory is already importable.

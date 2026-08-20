@@ -25,6 +25,12 @@ dbutils.widgets.text("reset", "false")
 
 # COMMAND ----------
 
+# Picks up edits to config.py after a git pull.
+%load_ext autoreload
+%autoreload 2
+
+# COMMAND ----------
+
 import json, os, sys, time, uuid, hashlib, random
 
 # config.py lives in ../databricks relative to this notebook.
