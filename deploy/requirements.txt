@@ -1,5 +1,9 @@
 flask
+gunicorn
 scikit-learn
 pandas
 numpy
 joblib
+# Unity Catalog model loading. If the workspace is unreachable the app still serves,
+# falling back to the bundled joblib artifacts (see src/model_source.py).
+mlflow-skinny[databricks]

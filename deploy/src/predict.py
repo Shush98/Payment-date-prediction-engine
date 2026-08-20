@@ -21,10 +21,14 @@ def load_models():
     }
 
 
-def predict(df, models):
+def predict(df, models, predictor=None):
     """Run payment date predictions on a DataFrame of open invoices.
 
-    Adds three prediction columns to the returned DataFrame:
+    Features are always built locally from the point-in-time customer timeline. Only the
+    scoring step varies: `predictor` may be backed by the Unity Catalog model or by the
+    bundled joblib artifacts (see src/model_source.py). Passing None uses the local one.
+
+    Adds four prediction columns to the returned DataFrame:
         days_late_pred  — point estimate (mean model)
         days_late_lower — 10th-percentile estimate (optimistic)
         days_late_upper — 90th-percentile estimate (pessimistic)
@@ -37,11 +41,14 @@ def predict(df, models):
         models["global_defaults"],
     )
 
-    X = enriched[FEATURE_COLS].values
+    if predictor is None:
+        from src.model_source import _load_local
+        predictor = _load_local(models)
 
-    enriched["days_late_pred"]  = models["model_mean"].predict(X).round(1)
-    enriched["days_late_lower"] = models["model_lower"].predict(X).round(1)
-    enriched["days_late_upper"] = models["model_upper"].predict(X).round(1)
+    scored = predictor.score(enriched)
+    enriched["days_late_pred"] = scored["days_late_pred"].to_numpy().round(1)
+    enriched["days_late_lower"] = scored["days_late_lower"].to_numpy().round(1)
+    enriched["days_late_upper"] = scored["days_late_upper"].to_numpy().round(1)
 
     enriched["predicted_payment_date"] = (
         pd.to_datetime(enriched["due_in_date"])

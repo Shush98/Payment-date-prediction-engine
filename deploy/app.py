@@ -5,6 +5,7 @@ import pandas as pd
 from flask import Flask, render_template, jsonify, request
 
 from src.predict import load_models, predict
+from src.model_source import load_predictor
 from src.decision import build_priority_table, DAILY_CAPACITY, _p_late, _p_responds
 from src.analytics import compute_analytics, compute_strategy_comparison
 
@@ -18,6 +19,12 @@ def format_number(value):
 
 # --- Load everything once at startup ---
 models = load_models()
+
+# Unity Catalog if DATABRICKS_HOST/TOKEN are set and the workspace answers, otherwise the
+# bundled artifacts. Resolved once here rather than per request - loading a registered
+# model takes seconds and must not sit in the request path.
+PREDICTOR = load_predictor(models)
+print(f"[model] {PREDICTOR.source} ({PREDICTOR.version}) - {PREDICTOR.detail}")
 
 raw = pd.read_csv(ROOT_DIR / "dataset.csv")
 raw["posting_date"] = pd.to_datetime(raw["posting_date"], format="mixed")
@@ -44,6 +51,17 @@ ANALYTICS = compute_analytics(
 @app.route("/")
 def dashboard():
     return render_template("dashboard.html", kpis=STATIC_KPIS)
+
+
+@app.route("/health")
+def health():
+    """Liveness plus model provenance. Makes it visible which model is actually serving
+    rather than leaving a silent fallback to look like the real thing."""
+    return jsonify({
+        "status": "ok",
+        "model": PREDICTOR.as_dict(),
+        "open_invoices": STATIC_KPIS["total_invoices"],
+    })
 
 
 @app.route("/api/analytics")
@@ -76,7 +94,7 @@ def get_invoices():
 
 @app.route("/api/predict", methods=["POST"])
 def run_predictions():
-    predictions = predict(OPEN_INVOICES, models)
+    predictions = predict(OPEN_INVOICES, models, PREDICTOR)
     priority    = build_priority_table(predictions)
 
     # --- Invoice table payload ---
