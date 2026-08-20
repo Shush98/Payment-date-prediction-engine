@@ -31,13 +31,29 @@ DEFAULT_MODEL_NAME = "workspace.payment_ops.payment_lateness"
 DEFAULT_ALIAS = "champion"
 
 
+def _report(status: str, message: str):
+    """Record what happened, always.
+
+    Build logs are easy to lose track of, and 'no output' is ambiguous - it cannot be
+    told apart from 'the script never ran'. This file makes the build-time outcome
+    visible from the running app via /health.
+    """
+    BAKED_DIR.mkdir(parents=True, exist_ok=True)
+    (BAKED_DIR / "fetch_report.json").write_text(json.dumps({
+        "status": status,
+        "message": message,
+        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }, indent=2))
+    print(f"[fetch_model] {status}: {message}")
+
+
 def main() -> int:
     model_name = os.getenv("UC_MODEL_NAME", DEFAULT_MODEL_NAME)
     alias = os.getenv("UC_MODEL_ALIAS", DEFAULT_ALIAS)
 
-    if not (os.getenv("DATABRICKS_HOST") and os.getenv("DATABRICKS_TOKEN")):
-        print("[fetch_model] DATABRICKS_HOST/DATABRICKS_TOKEN not set - skipping. "
-              "The app will serve bundled artifacts.")
+    missing = [v for v in ("DATABRICKS_HOST", "DATABRICKS_TOKEN") if not os.getenv(v)]
+    if missing:
+        _report("skipped", f"{' and '.join(missing)} not set at build time")
         return 0
 
     os.environ.setdefault("DATABRICKS_AUTH_TYPE", "pat")
@@ -74,13 +90,12 @@ def main() -> int:
         }
         (BAKED_DIR / "uc_model.json").write_text(json.dumps(meta, indent=2))
 
-        print(f"[fetch_model] baked version {mv.version} into {BAKED_DIR} "
-              f"in {time.monotonic() - started:.1f}s")
+        _report("baked", f"version {mv.version} in {time.monotonic() - started:.1f}s")
         return 0
 
     except Exception as e:                  # noqa: BLE001 - never fail the build
-        print(f"[fetch_model] FAILED after {time.monotonic() - started:.1f}s: "
-              f"{type(e).__name__}: {e}")
+        _report("failed", f"{type(e).__name__}: {e} "
+                          f"(after {time.monotonic() - started:.1f}s)")
         print("[fetch_model] continuing - the app will serve bundled artifacts.")
         return 0
 

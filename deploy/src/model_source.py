@@ -15,6 +15,7 @@ cust_payment_terms -> payment_terms. day_of_week already matches: the Spark pipe
 corrected to pandas' 0=Monday convention precisely so a model could cross this boundary.
 """
 
+import json
 import os
 import threading
 import time
@@ -139,11 +140,20 @@ def _load_baked():
     Plain joblib, so this costs no network call and does not import mlflow - which on a
     0.1-CPU host is the difference between instant and several minutes.
     """
-    import json
-
     meta_path = BAKED_DIR / "uc_model.json"
     if not meta_path.exists():
-        return None, "no build-time model (artifacts/uc/uc_model.json absent)"
+        # fetch_model.py writes a report on every path, so its absence is itself the
+        # answer: the build step never ran. That is a different problem from a fetch
+        # that ran and failed, and they need different fixes.
+        report = BAKED_DIR / "fetch_report.json"
+        if not report.exists():
+            return None, ("fetch_model never ran during build - check the service's "
+                          "Build Command includes 'python -m src.fetch_model'")
+        try:
+            r = json.loads(report.read_text())
+            return None, f"build fetch {r['status']}: {r['message']} (at {r['at']})"
+        except Exception as e:              # noqa: BLE001
+            return None, f"fetch report unreadable: {type(e).__name__}: {e}"
     try:
         import joblib
         from src.features import FEATURE_COLS

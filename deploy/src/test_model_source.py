@@ -409,9 +409,33 @@ def test_missing_baked_model_falls_through_with_reason():
         handle = ms.load_predictor_deferred(
             {"model_mean": _S(), "model_lower": _S(), "model_upper": _S()})
         assert handle.source == "local_artifacts"
-        assert "uc_model.json absent" in handle.as_dict()["fallback_reason"]
+        # No report file at all means the build step never executed - that is a distinct
+        # diagnosis from a fetch that ran and failed, and the message must say so.
+        assert "never ran during build" in handle.as_dict()["fallback_reason"]
     finally:
         ms.BAKED_DIR = saved_dir
+
+
+def test_build_fetch_report_is_surfaced():
+    """A fetch that ran and failed must report its actual error, not just 'absent'."""
+    import json as _json
+    import shutil
+    import tempfile
+    from pathlib import Path as _P
+
+    import src.model_source as ms
+
+    saved_dir = ms.BAKED_DIR
+    tmp = _P(tempfile.mkdtemp())
+    try:
+        ms.BAKED_DIR = tmp
+        (tmp / "fetch_report.json").write_text(_json.dumps({
+            "status": "failed", "message": "PermissionError: 403", "at": "2026-08-21T10:00:00Z"}))
+        _, reason = ms._load_baked()
+        assert "build fetch failed" in reason and "403" in reason, reason
+    finally:
+        ms.BAKED_DIR = saved_dir
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_predictor_reports_provenance():
