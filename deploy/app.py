@@ -5,7 +5,7 @@ import pandas as pd
 from flask import Flask, render_template, jsonify, request
 
 from src.predict import load_models, predict
-from src.model_source import load_predictor
+from src.model_source import load_predictor_deferred
 from src.decision import build_priority_table, DAILY_CAPACITY, _p_late, _p_responds
 from src.analytics import compute_analytics, compute_strategy_comparison
 
@@ -20,11 +20,11 @@ def format_number(value):
 # --- Load everything once at startup ---
 models = load_models()
 
-# Unity Catalog if DATABRICKS_HOST/TOKEN are set and the workspace answers, otherwise the
-# bundled artifacts. Resolved once here rather than per request - loading a registered
-# model takes seconds and must not sit in the request path.
-PREDICTOR = load_predictor(models)
-print(f"[model] {PREDICTOR.source} ({PREDICTOR.version}) - {PREDICTOR.detail}")
+# Returns immediately with the bundled artifacts and upgrades to the Unity Catalog model
+# in a background thread. Loading a registered model is a network call; doing it inline
+# here blocks gunicorn's worker boot, the port never opens, and the host kills the deploy.
+PREDICTOR = load_predictor_deferred(models)
+print(f"[model] serving {PREDICTOR.source} ({PREDICTOR.version}) - {PREDICTOR.detail}")
 
 raw = pd.read_csv(ROOT_DIR / "dataset.csv")
 raw["posting_date"] = pd.to_datetime(raw["posting_date"], format="mixed")

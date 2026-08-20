@@ -16,12 +16,18 @@ corrected to pandas' 0=Monday convention precisely so a model could cross this b
 """
 
 import os
+import threading
 import warnings
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 import numpy as np
 import pandas as pd
+
+# Bound how long MLflow will sit on a network call. Without this a slow or unreachable
+# workspace can block for minutes. Set before mlflow is imported anywhere.
+os.environ.setdefault("MLFLOW_HTTP_REQUEST_TIMEOUT", "20")
+os.environ.setdefault("MLFLOW_HTTP_REQUEST_MAX_RETRIES", "2")
 
 # What the Unity Catalog model expects. Must stay in step with
 # databricks/modeling.py RAW_INPUT_COLS - test_model_source.py asserts it.
@@ -135,3 +141,69 @@ def load_predictor(models: dict,
     local = _load_local(models)
     local.fallback_reason = f"{model_name}@{alias} -> {reason}"
     return local
+
+
+class DeferredPredictor:
+    """Serves local artifacts immediately, upgrades to Unity Catalog in the background.
+
+    Loading a registered model is a network call that can take tens of seconds, or hang
+    if the workspace is unreachable. Doing that at import time blocks gunicorn's worker
+    boot, so the port never opens and the host kills the deploy - which is exactly what
+    happened once already.
+
+    So: bind the port first, serve from bundled artifacts, and swap the real model in
+    when it arrives. /health reports whichever is currently live.
+    """
+
+    def __init__(self, initial: Predictor):
+        self._predictor = initial
+        self._lock = threading.Lock()
+
+    @property
+    def source(self):
+        return self._predictor.source
+
+    @property
+    def version(self):
+        return self._predictor.version
+
+    @property
+    def detail(self):
+        return self._predictor.detail
+
+    def score(self, enriched: pd.DataFrame) -> pd.DataFrame:
+        with self._lock:
+            current = self._predictor
+        return current.score(enriched)
+
+    def as_dict(self):
+        with self._lock:
+            return self._predictor.as_dict()
+
+    def _swap(self, predictor: Predictor):
+        with self._lock:
+            self._predictor = predictor
+
+
+def load_predictor_deferred(models: dict,
+                            model_name: str = None,
+                            alias: str = None) -> DeferredPredictor:
+    """Non-blocking. Returns immediately with the local model; upgrades asynchronously."""
+    model_name = model_name or os.getenv("UC_MODEL_NAME", DEFAULT_MODEL_NAME)
+    alias = alias or os.getenv("UC_MODEL_ALIAS", DEFAULT_ALIAS)
+
+    local = _load_local(models)
+    local.fallback_reason = f"{model_name}@{alias} -> loading in background"
+    handle = DeferredPredictor(local)
+
+    def _upgrade():
+        uc, reason = _load_unity_catalog(model_name, alias)
+        if uc is not None:
+            handle._swap(uc)
+            print(f"[model] upgraded to {uc.source} ({uc.version})")
+        else:
+            local.fallback_reason = f"{model_name}@{alias} -> {reason}"
+            print(f"[model] staying on local artifacts: {reason}")
+
+    threading.Thread(target=_upgrade, name="uc-model-load", daemon=True).start()
+    return handle

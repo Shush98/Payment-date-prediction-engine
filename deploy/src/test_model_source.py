@@ -159,6 +159,77 @@ def test_uc_sets_both_tracking_and_registry_uris():
                 os.environ[k] = v
 
 
+def test_deferred_loader_returns_immediately():
+    """Regression: loading the UC model inline blocked gunicorn's worker boot, so the
+    port never opened and Render killed the deploy with 'No open ports detected'.
+
+    The loader must return fast even when the Unity Catalog path hangs.
+    """
+    import os
+    import time
+    import types
+
+    from src.model_source import load_predictor_deferred
+
+    # A stub whose load_model sleeps, standing in for an unreachable workspace.
+    fake = types.ModuleType("mlflow")
+    fake.set_tracking_uri = lambda u: None
+    fake.set_registry_uri = lambda u: None
+    fake.pyfunc = types.SimpleNamespace(load_model=lambda uri: time.sleep(5))
+    tracking_mod = types.ModuleType("mlflow.tracking")
+    tracking_mod.MlflowClient = lambda: types.SimpleNamespace(
+        get_model_version_by_alias=lambda n, a: types.SimpleNamespace(version="1"))
+    fake.tracking = tracking_mod
+
+    saved_mods = {k: sys.modules.get(k) for k in ("mlflow", "mlflow.tracking")}
+    saved_env = {k: os.environ.get(k) for k in ("DATABRICKS_HOST", "DATABRICKS_TOKEN")}
+    sys.modules["mlflow"], sys.modules["mlflow.tracking"] = fake, tracking_mod
+    os.environ["DATABRICKS_HOST"], os.environ["DATABRICKS_TOKEN"] = "https://x", "tok"
+    try:
+        class _S:
+            def predict(self, X): return np.zeros(len(X))
+        models = {"model_mean": _S(), "model_lower": _S(), "model_upper": _S()}
+
+        start = time.monotonic()
+        handle = load_predictor_deferred(models)
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 1.0, f"loader blocked for {elapsed:.1f}s - would stall worker boot"
+        assert handle.source == "local_artifacts", "must serve something immediately"
+        assert "loading in background" in handle.as_dict()["fallback_reason"]
+
+        # And it must be usable right away, not just constructed.
+        from src.features import FEATURE_COLS
+        enriched = pd.DataFrame([{c: 0.0 for c in FEATURE_COLS}])
+        assert len(handle.score(enriched)) == 1
+    finally:
+        for k, v in saved_mods.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def test_deferred_predictor_swaps_under_lock():
+    from src.model_source import DeferredPredictor, Predictor
+
+    local = Predictor("local_artifacts", "bundled", lambda df: "LOCAL")
+    handle = DeferredPredictor(local)
+    assert handle.score(None) == "LOCAL"
+    assert handle.source == "local_artifacts"
+
+    handle._swap(Predictor("unity_catalog", "9", lambda df: "UC", detail="models:/x@champion"))
+    assert handle.score(None) == "UC", "swap did not take effect"
+    assert handle.source == "unity_catalog"
+    assert handle.version == "9"
+    assert handle.as_dict()["source"] == "unity_catalog"
+
+
 def test_predictor_reports_provenance():
     p = Predictor("unity_catalog", "3", lambda df: df, detail="models:/x@champion")
     assert p.as_dict() == {"source": "unity_catalog", "version": "3",
