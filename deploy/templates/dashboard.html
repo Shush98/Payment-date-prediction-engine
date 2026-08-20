@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AR Intelligence Dashboard</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" defer></script>
+</head>
+<body>
+
+  <!-- ═══════════════════ HEADER ═══════════════════ -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+        <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+        <path d="M2 17l10 5 10-5"/>
+        <path d="M2 12l10 5 10-5"/>
+      </svg>
+      <span class="topbar-title">AR Intelligence</span>
+      <span class="topbar-sub">Payment Dashboard</span>
+    </div>
+
+    <nav class="tab-nav">
+      <button class="tab-btn active" onclick="switchTab('operations')">Operations</button>
+      <button class="tab-btn" onclick="switchTab('impact')">Impact Analysis</button>
+      <button class="tab-btn" onclick="switchTab('intelligence')">Model Intelligence</button>
+    </nav>
+
+    <div class="topbar-right">
+      <span id="last-run" class="last-run-label"></span>
+      <button id="predict-btn" class="btn-predict" onclick="runPredictions()">
+        <span id="btn-icon" class="btn-icon">
+          <svg viewBox="0 0 20 20" fill="currentColor">
+            <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd"/>
+          </svg>
+        </span>
+        <span id="btn-text">Run Predictions</span>
+      </button>
+    </div>
+  </header>
+
+  <main class="main">
+
+    <!-- ══════════════ TAB 1: OPERATIONS ══════════════ -->
+    <div id="tab-operations" class="tab-panel tab-ops">
+
+      <!-- LEFT: OPEN INVOICES -->
+      <section class="section">
+        <div class="section-header">
+          <h2 class="section-title">Open Invoices</h2>
+          <span class="section-badge">{{ kpis.total_invoices | int | format_number }} total</span>
+        </div>
+
+        <div class="kpi-row">
+          <div class="kpi-card">
+            <span class="kpi-label">Total Open</span>
+            <span class="kpi-value">{{ kpis.total_invoices | int | format_number }}</span>
+            <span class="kpi-unit">invoices</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Outstanding</span>
+            <span class="kpi-value">${{ (kpis.total_outstanding / 1_000_000) | round(2) }}M</span>
+            <span class="kpi-unit">total value</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Oldest Open</span>
+            <span class="kpi-value">{{ kpis.oldest_days }}</span>
+            <span class="kpi-unit">days</span>
+          </div>
+          <div class="kpi-card" id="kpi-avg-late" style="opacity:0.3;">
+            <span class="kpi-label">Avg Delay</span>
+            <span class="kpi-value" id="kpi-avg-late-val">—</span>
+            <span class="kpi-unit">days (predicted)</span>
+          </div>
+          <div class="kpi-card" id="kpi-at-risk" style="opacity:0.3;">
+            <span class="kpi-label">At Risk</span>
+            <span class="kpi-value" id="kpi-at-risk-val">—</span>
+            <span class="kpi-unit">late invoices</span>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Invoice ID</th>
+                <th>Customer</th>
+                <th class="num">Amount</th>
+                <th class="num">Due Date</th>
+                <th class="num">Predicted Payment</th>
+                <th class="num">Confidence Range</th>
+              </tr>
+            </thead>
+            <tbody id="invoice-tbody">
+              <tr><td colspan="6" class="loading-cell">
+                <span class="spinner"></span> Loading…
+              </td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="pagination" id="pagination"></div>
+      </section>
+
+      <!-- RIGHT: COLLECTION PRIORITY -->
+      <section class="section" id="priority-section">
+        <div class="section-header">
+          <h2 class="section-title">Collection Priority</h2>
+          <span class="section-badge" id="priority-badge">Run predictions to populate</span>
+        </div>
+
+        <div class="kpi-row" id="priority-kpis" style="opacity:0.3; pointer-events:none;">
+          <div class="kpi-card kpi-red">
+            <span class="kpi-label">Call</span>
+            <span class="kpi-value" id="kpi-call-count">—</span>
+            <span class="kpi-unit">invoices today</span>
+          </div>
+          <div class="kpi-card kpi-yellow">
+            <span class="kpi-label">Remind</span>
+            <span class="kpi-value" id="kpi-remind-count">—</span>
+            <span class="kpi-unit">email reminders</span>
+          </div>
+          <div class="kpi-card kpi-blue">
+            <span class="kpi-label">Watch</span>
+            <span class="kpi-value" id="kpi-watch-count">—</span>
+            <span class="kpi-unit">monitor only</span>
+          </div>
+          <div class="kpi-card kpi-green">
+            <span class="kpi-label">Daily Recovery</span>
+            <span class="kpi-value" id="kpi-daily-recovery">—</span>
+            <span class="kpi-unit">expected value</span>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <div id="priority-empty" class="empty-state">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2z"/>
+              <path d="M15 13v6a2 2 0 002 2h2a2 2 0 002-2v-6a2 2 0 00-2-2h-2a2 2 0 00-2 2z"/>
+              <path d="M9 7h6M12 4v3"/>
+            </svg>
+            <p>Click <strong>Run Predictions</strong> to generate the priority list</p>
+          </div>
+          <table class="data-table" id="priority-table" style="display:none;">
+            <thead>
+              <tr>
+                <th class="num">#</th>
+                <th>Customer</th>
+                <th class="num">Amount</th>
+                <th class="num">Delay</th>
+                <th class="num">P(Late)</th>
+                <th class="num">P(Responds)</th>
+                <th class="num">Exp. Value</th>
+                <th class="center">Action</th>
+              </tr>
+            </thead>
+            <tbody id="priority-tbody"></tbody>
+          </table>
+        </div>
+        <div class="pagination" id="priority-pagination"></div>
+      </section>
+
+    </div><!-- /#tab-operations -->
+
+    <!-- ══════════════ TAB 2: IMPACT ANALYSIS ══════════════ -->
+    <div id="tab-impact" class="tab-panel tab-scroll" style="display:none;">
+
+      <div class="analytics-section">
+        <div class="section-header">
+          <h2 class="section-title">Business Impact Analysis</h2>
+          <span class="section-badge">Run predictions to activate</span>
+        </div>
+        <div class="analytics-body">
+
+          <!-- Impact KPIs (shown after predict) -->
+          <div id="impact-kpis" class="impact-kpi-row" style="opacity:0.3;">
+            <div class="impact-kpi-cell">
+              <div class="kpi-label">Annual Engine Value</div>
+              <div class="kpi-value kpi-green-val" id="imp-annual-engine">—</div>
+              <div class="kpi-unit">projected (250 working days)</div>
+            </div>
+            <div class="impact-kpi-cell">
+              <div class="kpi-label">vs. Random Baseline</div>
+              <div class="kpi-value kpi-green-val" id="imp-vs-random">—</div>
+              <div class="kpi-unit">annual improvement</div>
+            </div>
+            <div class="impact-kpi-cell">
+              <div class="kpi-label">vs. Largest-First</div>
+              <div class="kpi-value kpi-blue-val" id="imp-vs-amount">—</div>
+              <div class="kpi-unit">annual improvement</div>
+            </div>
+          </div>
+
+          <div class="analytics-grid-2">
+            <!-- Strategy Comparison -->
+            <div class="analytics-card">
+              <div class="analytics-card-title">Strategy Comparison — 20 Calls/Day</div>
+              <div class="analytics-card-sub" id="strategy-empty-msg" style="color:var(--text-muted);font-size:0.75rem;padding:8px 0;">
+                Run predictions to see live strategy comparison on your open invoice portfolio
+              </div>
+              <div class="chart-wrap" id="strategy-chart-wrap" style="display:none;height:140px;">
+                <canvas id="strategy-chart"></canvas>
+              </div>
+            </div>
+
+            <!-- Value at Risk by Tier -->
+            <div class="analytics-card">
+              <div class="analytics-card-title">Portfolio Exposure by Collection Tier</div>
+              <div class="analytics-card-sub" id="var-empty-msg" style="color:var(--text-muted);font-size:0.75rem;padding:8px 0;">
+                Run predictions to see how your AR portfolio is distributed across action tiers
+              </div>
+              <div class="chart-wrap" id="var-chart-wrap" style="display:none;height:140px;">
+                <canvas id="var-chart"></canvas>
+              </div>
+              <div id="var-legend" class="var-legend" style="display:none;"></div>
+            </div>
+          </div>
+
+          <!-- EV Formula Explainer -->
+          <div class="analytics-card">
+            <div class="analytics-card-title">Expected Value Framework</div>
+            <div class="formula-block">
+              EV = P(late) &times; P(responds) &times; 3 days &times; 0.03%/day &times; Invoice Amount &minus; $15 call cost
+            </div>
+            <div class="analytics-grid-2" style="margin-top:12px;gap:10px;">
+              <div class="formula-component">
+                <div class="formula-comp-title">P(late) — Probability of Late Payment</div>
+                <div class="formula-comp-body">Derived from the prediction interval position. If the upper bound of the 80% PI is well above zero, P(late) is high. If even the pessimistic scenario predicts on-time payment, P(late) approaches zero. This uses uncertainty, not just the point prediction.</div>
+              </div>
+              <div class="formula-component">
+                <div class="formula-comp-title">P(responds) — Customer Responsiveness</div>
+                <div class="formula-comp-body">Inverse of payment variability. Customers with consistent payment patterns (low std dev) tend to respond to collection calls. Erratic payers (high std dev) are less predictable and score lower on responsiveness, clipped to [0.2, 0.8].</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Causal Insights -->
+          <div class="analytics-card">
+            <div class="analytics-card-title">Causal Insights</div>
+            <div class="causal-grid">
+              <div class="causal-tile">
+                <div class="causal-tile-icon">&#128197;</div>
+                <div class="causal-tile-title">Customer History Dominates</div>
+                <div class="causal-tile-finding">Past behavior explains 79.8% of prediction variance. A customer's average days late is by far the strongest signal — better than any invoice-level feature.</div>
+                <div class="causal-tile-evidence">GBM feature importance (mean model): cust_avg_days_late = 65.8%</div>
+              </div>
+              <div class="causal-tile">
+                <div class="causal-tile-icon">&#128198;</div>
+                <div class="causal-tile-title">Year-End Accounting Pressure</div>
+                <div class="causal-tile-finding">December invoices are paid ~2 days earlier on average, driven by customers closing their own books. This is a natural experiment — exogenous timing pressure reduces payment delay.</div>
+                <div class="causal-tile-evidence">is_year_end feature; seasonal pattern consistent across 2018–2020</div>
+              </div>
+              <div class="causal-tile">
+                <div class="causal-tile-icon">&#128196;</div>
+                <div class="causal-tile-title">Payment Terms as Structural Constraint</div>
+                <div class="causal-tile-finding">Payment terms (net-30, net-60, etc.) explain 8.1% of variance — more than all temporal features combined. Contractual structure shapes behavior more than invoice timing.</div>
+                <div class="causal-tile-evidence">payment_terms_encoded = 8.1% importance; 4th highest feature</div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div><!-- /#tab-impact -->
+
+    <!-- ══════════════ TAB 3: MODEL INTELLIGENCE ══════════════ -->
+    <div id="tab-intelligence" class="tab-panel tab-scroll" style="display:none;">
+
+      <div class="analytics-section">
+        <div class="section-header">
+          <h2 class="section-title">Model Intelligence</h2>
+          <span class="section-badge" id="intel-test-size">Loading…</span>
+        </div>
+        <div class="analytics-body">
+
+          <!-- Model Metric KPIs -->
+          <div class="model-kpi-row">
+            <div class="model-kpi-cell">
+              <div class="kpi-label">RMSE</div>
+              <div class="kpi-value" id="intel-rmse">—</div>
+              <div class="kpi-unit">days</div>
+            </div>
+            <div class="model-kpi-cell">
+              <div class="kpi-label">MAE</div>
+              <div class="kpi-value" id="intel-mae">—</div>
+              <div class="kpi-unit">days</div>
+            </div>
+            <div class="model-kpi-cell">
+              <div class="kpi-label">Within ±3 Days</div>
+              <div class="kpi-value kpi-green-val" id="intel-within3">—</div>
+              <div class="kpi-unit">accuracy</div>
+            </div>
+            <div class="model-kpi-cell">
+              <div class="kpi-label">PI Coverage</div>
+              <div class="kpi-value" id="intel-pi-cov">—</div>
+              <div class="kpi-unit">80% nominal target</div>
+            </div>
+          </div>
+
+          <div class="analytics-grid-2">
+
+            <!-- Feature Importance -->
+            <div class="analytics-card">
+              <div class="analytics-card-title">Feature Importance — Mean GBM Model</div>
+              <div class="chart-wrap" style="height:260px;">
+                <canvas id="feature-importance-chart"></canvas>
+              </div>
+              <div class="category-pills" id="category-pills"></div>
+            </div>
+
+            <!-- PI Calibration -->
+            <div class="analytics-card">
+              <div class="analytics-card-title">Prediction Interval Calibration</div>
+              <div class="pi-main-stat">
+                <span id="pi-coverage-val" class="pi-big-num">—</span>
+                <span class="pi-label-text">coverage on 80% PI</span>
+                <span id="pi-cal-badge" class="pi-cal-badge">—</span>
+              </div>
+              <div class="pi-sub-stat">
+                Avg interval width: <strong id="pi-width-val">—</strong> days &nbsp;|&nbsp;
+                Median: <strong id="pi-median-val">—</strong> days
+              </div>
+              <table class="coverage-table" id="coverage-table">
+                <thead>
+                  <tr>
+                    <th>PI Width Bucket</th>
+                    <th style="text-align:right;">Sample</th>
+                    <th style="text-align:right;">Coverage</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="coverage-tbody"></tbody>
+              </table>
+              <div class="pi-note">Nominal target is 80% — intervals are from quantile regression (α=0.1, α=0.9)</div>
+
+              <div class="analytics-card-title" style="margin-top:18px;">Model Architecture</div>
+              <div id="model-arch-rows"></div>
+            </div>
+
+          </div><!-- /.analytics-grid-2 -->
+
+          <!-- Customer Segmentation (full width) -->
+          <div class="analytics-card">
+            <div class="analytics-card-title">Customer Risk Segmentation</div>
+            <div class="analytics-card-sub-text">
+              4-quadrant analysis of <strong id="seg-customer-count">—</strong> customers by payment behavior.
+              Median splits on avg days late and payment variability.
+            </div>
+            <div class="seg-layout">
+              <div class="chart-wrap" style="height:300px;flex:1;">
+                <canvas id="customer-scatter-chart"></canvas>
+              </div>
+              <div class="segment-grid" id="segment-cards"></div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div><!-- /#tab-intelligence -->
+
+  </main>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

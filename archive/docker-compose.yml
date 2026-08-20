@@ -1,0 +1,11 @@
+services:
+  web:
+    build: .
+    ports:
+      - "8000:80"
+    volumes:
+      - ./app:/app/app
+      - ./artifacts:/app/artifacts
+      - ./dataset.csv:/app/dataset.csv
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1

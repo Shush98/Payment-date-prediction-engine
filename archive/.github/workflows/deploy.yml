@@ -1,0 +1,56 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: pytest tests/ -v
+
+  build-and-deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t payment-prediction .
+
+      - name: Deploy to EC2
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          # Save SSH key
+          echo "$EC2_SSH_KEY" > /tmp/ec2_key.pem
+          chmod 600 /tmp/ec2_key.pem
+
+          # Copy files and deploy
+          ssh -o StrictHostKeyChecking=no -i /tmp/ec2_key.pem ec2-user@$EC2_HOST << 'DEPLOY'
+            cd ~/payment-prediction
+            git pull origin main
+            docker-compose down
+            docker-compose up -d --build
+            sleep 5
+            curl -f http://localhost/health || exit 1
+            echo "Deployment successful!"
+          DEPLOY
+
+          rm /tmp/ec2_key.pem
