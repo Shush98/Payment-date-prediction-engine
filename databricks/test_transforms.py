@@ -17,9 +17,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
-from transforms import (HIST_COLS, asof_join_history, build_customer_timeline,
-                        build_gold_customer_behavior, dedupe_events, join_outcomes,
-                        validate_invoices)
+from transforms import (HIST_COLS, add_invoice_features, asof_join_history,
+                        build_customer_timeline, build_gold_customer_behavior,
+                        dedupe_events, join_outcomes, validate_invoices)
 
 DEFAULTS = {c: 0.0 for c in HIST_COLS}
 
@@ -172,6 +172,26 @@ def test_gold_respects_explicit_as_of(spark):
     g = build_gold_customer_behavior(out, as_of=date(2021, 1, 1)).collect()[0]
     assert g["recent_90d_avg_days_late"] is None
     assert g["invoice_count"] == 2, "lifetime aggregates must be unaffected by as_of"
+
+
+def test_day_of_week_matches_pandas_convention(spark):
+    """Spark dayofweek is 1=Sunday..7=Saturday; pandas .dt.dayofweek is 0=Monday..6=Sunday.
+    Both pipelines must agree or a model trained in one is wrong in the other.
+
+    Expected values are pandas' documented convention, written literally rather than
+    computed - importing pandas here would make this Spark test depend on a matching
+    pandas build, and deploy/src/test_features.py already covers the pandas side.
+    """
+    df = spark.createDataFrame(
+        [("i1", "c1", date(2020, 1, 5), 100.0),    # Sunday
+         ("i2", "c1", date(2020, 1, 6), 100.0),    # Monday
+         ("i3", "c1", date(2020, 1, 11), 100.0),   # Saturday
+         ("i4", "c1", date(2020, 1, 8), 100.0)],   # Wednesday
+        "invoice_id string, customer_id string, posting_date date, invoice_amount double")
+
+    got = {r["invoice_id"]: r["day_of_week"] for r in add_invoice_features(df).collect()}
+    want = {"i1": 6, "i2": 0, "i3": 5, "i4": 2}    # Sun=6, Mon=0, Sat=5, Wed=2
+    assert got == want, f"spark {got} != pandas convention {want}"
 
 
 def test_dedupe_keeps_latest_ingestion(spark):

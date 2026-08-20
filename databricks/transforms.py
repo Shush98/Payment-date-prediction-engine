@@ -244,10 +244,16 @@ def asof_join_history(invoices: DataFrame, timeline: DataFrame, defaults: dict) 
 
 
 def add_invoice_features(df: DataFrame) -> DataFrame:
-    """Non-history features. All knowable at invoice creation, so no leakage risk."""
+    """Non-history features. All knowable at invoice creation, so no leakage risk.
+
+    day_of_week is converted to pandas' convention (0=Monday .. 6=Sunday). Spark's
+    dayofweek() is 1=Sunday .. 7=Saturday, so leaving it raw would give the same
+    invoice a different value here than in deploy/src/features.py - a silent
+    train/serve skew the moment a model crosses between the two pipelines.
+    """
     return (df
             .withColumn("amount_log", F.log1p(F.abs(F.col("invoice_amount"))))
             .withColumn("month", F.month("posting_date"))
-            .withColumn("day_of_week", F.dayofweek("posting_date"))
+            .withColumn("day_of_week", F.pmod(F.dayofweek("posting_date") + 5, F.lit(7)))
             .withColumn("is_month_end", (F.dayofmonth("posting_date") > 25).cast("int"))
             .withColumn("is_year_end", (F.month("posting_date") == 12).cast("int")))
