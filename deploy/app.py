@@ -57,6 +57,9 @@ def dashboard():
 def health():
     """Liveness plus model provenance. Makes it visible which model is actually serving
     rather than leaving a silent fallback to look like the real thing."""
+    # Kicks off the Unity Catalog load on first call, and revives it if the thread ever
+    # disappeared. Idempotent and non-blocking.
+    PREDICTOR.ensure_started()
     return jsonify({
         "status": "ok",
         "model": PREDICTOR.as_dict(),
@@ -94,6 +97,7 @@ def get_invoices():
 
 @app.route("/api/predict", methods=["POST"])
 def run_predictions():
+    PREDICTOR.ensure_started()
     predictions = predict(OPEN_INVOICES, models, PREDICTOR)
     priority    = build_priority_table(predictions)
 

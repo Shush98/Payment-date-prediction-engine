@@ -156,12 +156,59 @@ class DeferredPredictor:
     when it arrives. /health reports whichever is currently live.
     """
 
-    def __init__(self, initial: Predictor):
+    MAX_ATTEMPTS = 3
+
+    def __init__(self, initial: Predictor, loader=None, label=""):
         self._predictor = initial
+        self._loader = loader            # () -> (Predictor | None, reason)
+        self._label = label
         self._lock = threading.Lock()
         self._started = time.monotonic()
         self._state = "loading"          # loading | active | failed
         self._thread = None
+        self._attempts = 0
+
+    def ensure_started(self):
+        """Start (or restart) the background load. Idempotent, safe to call per request.
+
+        Deliberately NOT called at import. A thread started during module import does not
+        survive the fork that gunicorn does when spawning a worker: the object remains but
+        the thread is gone, leaving the load permanently 'in progress' in the process that
+        actually serves traffic. Starting on first request guarantees the thread lives in
+        the right process, and revives it if it ever disappears.
+        """
+        if self._loader is None:
+            return
+        with self._lock:
+            if self._state != "loading":
+                return
+            if self._thread is not None and self._thread.is_alive():
+                return
+            if self._attempts >= self.MAX_ATTEMPTS:
+                self._predictor.fallback_reason = (
+                    f"{self._label} -> gave up after {self._attempts} attempts")
+                self._state = "failed"
+                return
+            self._attempts += 1
+            self._started = time.monotonic()
+            self._thread = threading.Thread(target=self._run, name="uc-model-load", daemon=True)
+            thread = self._thread
+        thread.start()
+
+    def _run(self):
+        started = time.monotonic()
+        try:
+            uc, reason = self._loader()
+        except BaseException as e:      # noqa: BLE001 - a dead thread must not look live
+            uc, reason = None, f"loader thread crashed: {type(e).__name__}: {e}"
+
+        took = time.monotonic() - started
+        if uc is not None:
+            self._swap(uc)
+            print(f"[model] upgraded to unity_catalog ({uc.version}) in {took:.1f}s")
+        else:
+            self._fail(f"{self._label} -> {reason} (after {took:.1f}s)")
+            print(f"[model] staying on local artifacts after {took:.1f}s: {reason}")
 
     @property
     def source(self):
@@ -186,14 +233,18 @@ class DeferredPredictor:
             state, started = self._state, self._started
 
         if state == "loading":
-            # Distinguish "still working" from "wedged". A load that has been running for
-            # minutes is hung on something HTTP timeouts do not cover (SDK auth, DNS),
-            # not merely slow - and that difference decides what to fix next.
+            # Distinguish "still working" from "wedged". A load running for minutes is
+            # hung on something HTTP timeouts do not cover (SDK auth, DNS), not slow -
+            # and that difference decides what to fix next.
             elapsed = time.monotonic() - started
             alive = self._thread.is_alive() if self._thread else False
+            if self._thread is None:
+                stage = "not started yet"
+            else:
+                stage = "running" if alive else "thread gone, will retry"
             info["fallback_reason"] = (
-                f"unity catalog load {'running' if alive else 'DIED SILENTLY'} "
-                f"for {elapsed:.0f}s")
+                f"unity catalog load {stage} for {elapsed:.0f}s "
+                f"(attempt {self._attempts}/{self.MAX_ATTEMPTS})")
         return info
 
     def _swap(self, predictor: Predictor):
@@ -210,27 +261,16 @@ class DeferredPredictor:
 def load_predictor_deferred(models: dict,
                             model_name: str = None,
                             alias: str = None) -> DeferredPredictor:
-    """Non-blocking. Returns immediately with the local model; upgrades asynchronously."""
+    """Non-blocking. Returns the local model immediately.
+
+    The Unity Catalog load is NOT started here - call ensure_started() from a request
+    handler. See DeferredPredictor.ensure_started for why import time is the wrong place.
+    """
     model_name = model_name or os.getenv("UC_MODEL_NAME", DEFAULT_MODEL_NAME)
     alias = alias or os.getenv("UC_MODEL_ALIAS", DEFAULT_ALIAS)
 
-    handle = DeferredPredictor(_load_local(models))
-
-    def _upgrade():
-        started = time.monotonic()
-        try:
-            uc, reason = _load_unity_catalog(model_name, alias)
-        except BaseException as e:       # noqa: BLE001 - a dead thread must not look like a live one
-            uc, reason = None, f"loader thread crashed: {type(e).__name__}: {e}"
-
-        took = time.monotonic() - started
-        if uc is not None:
-            handle._swap(uc)
-            print(f"[model] upgraded to unity_catalog ({uc.version}) in {took:.1f}s")
-        else:
-            handle._fail(f"{model_name}@{alias} -> {reason} (after {took:.1f}s)")
-            print(f"[model] staying on local artifacts after {took:.1f}s: {reason}")
-
-    handle._thread = threading.Thread(target=_upgrade, name="uc-model-load", daemon=True)
-    handle._thread.start()
-    return handle
+    return DeferredPredictor(
+        _load_local(models),
+        loader=lambda: _load_unity_catalog(model_name, alias),
+        label=f"{model_name}@{alias}",
+    )

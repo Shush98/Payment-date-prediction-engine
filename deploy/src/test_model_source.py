@@ -192,12 +192,13 @@ def test_deferred_loader_returns_immediately():
 
         start = time.monotonic()
         handle = load_predictor_deferred(models)
+        handle.ensure_started()
         elapsed = time.monotonic() - start
 
         assert elapsed < 1.0, f"loader blocked for {elapsed:.1f}s - would stall worker boot"
         assert handle.source == "local_artifacts", "must serve something immediately"
         reason = handle.as_dict()["fallback_reason"]
-        assert "running" in reason and "for 0s" in reason, reason
+        assert "running" in reason and "attempt 1/3" in reason, reason
 
         # And it must be usable right away, not just constructed.
         from src.features import FEATURE_COLS
@@ -216,14 +217,52 @@ def test_deferred_loader_returns_immediately():
                 os.environ[k] = v
 
 
-def test_dead_loader_thread_is_reported_not_hidden():
-    """A thread that died without setting a result must not read as 'still loading'
-    forever - that looks identical to a slow load and hides the real failure."""
+def test_load_is_not_started_at_construction():
+    """Regression: a thread started during module import does not survive gunicorn's
+    fork, leaving the serving process stuck on 'loading' forever. Nothing may start
+    until a request calls ensure_started()."""
     from src.model_source import DeferredPredictor, Predictor
 
-    handle = DeferredPredictor(Predictor("local_artifacts", "bundled", lambda df: None))
-    handle._thread = None                       # never started / already gone
-    assert "DIED SILENTLY" in handle.as_dict()["fallback_reason"]
+    started = []
+    handle = DeferredPredictor(Predictor("local_artifacts", "bundled", lambda df: None),
+                               loader=lambda: (started.append(1), (None, "no"))[1],
+                               label="cat.sch.m@champion")
+    assert handle._thread is None, "must not spawn a thread at construction"
+    assert started == [], "loader must not run until ensure_started()"
+    assert "not started yet" in handle.as_dict()["fallback_reason"]
+
+
+def test_ensure_started_revives_a_vanished_thread():
+    """If the thread disappears (e.g. it was created pre-fork), the next request must
+    restart it rather than report 'loading' indefinitely."""
+    import time as _t
+    from src.model_source import DeferredPredictor, Predictor
+
+    runs = []
+    handle = DeferredPredictor(Predictor("local_artifacts", "bundled", lambda df: None),
+                               loader=lambda: (runs.append(1), (None, "nope"))[1],
+                               label="cat.sch.m@champion")
+    handle.ensure_started()
+    for _ in range(50):                     # let the first attempt finish
+        if runs:
+            break
+        _t.sleep(0.02)
+    assert runs == [1], runs
+
+    # It failed terminally, so further calls must not respawn.
+    handle.ensure_started()
+    assert len(runs) == 1, "a terminal failure must not be retried forever"
+    assert "nope" in handle.as_dict()["fallback_reason"]
+
+
+def test_retry_attempts_are_capped():
+    from src.model_source import DeferredPredictor, Predictor
+
+    handle = DeferredPredictor(Predictor("local_artifacts", "bundled", lambda df: None),
+                               loader=lambda: (None, "x"), label="m@champion")
+    handle._attempts = DeferredPredictor.MAX_ATTEMPTS
+    handle.ensure_started()
+    assert "gave up after" in handle.as_dict()["fallback_reason"]
 
 
 def test_failed_load_records_terminal_reason():
