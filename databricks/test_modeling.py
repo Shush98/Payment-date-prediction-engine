@@ -13,9 +13,9 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "deploy"))
 
-from modeling import (FEATURE_COLS, PaymentLatenessModel, apply_encoders, build_encoders,
-                      business_metrics, chronological_split, expected_value,
-                      late_classification_auc, model_metrics, p_late, p_responds)
+from modeling import (DEFAULT_KEYS, FEATURE_COLS, RAW_INPUT_COLS, PaymentLatenessModel,
+                      apply_encoders, build_encoders, business_metrics, chronological_split,
+                      expected_value, late_classification_auc, model_metrics, p_late, p_responds)
 
 
 def test_feature_cols_match_flask_app():
@@ -110,11 +110,20 @@ class _Stub:
     def predict(self, X): return np.full(len(X), self.v, dtype=float)
 
 
+ENCODERS = {"payment_terms": {"NAA8": 0, "NAH4": 1}, "business_code": {"U001": 0}}
+
+
+def _raw_row(terms="NAA8", code="U001"):
+    row = {c: 0.0 for c in RAW_INPUT_COLS if c not in ("payment_terms", "business_code")}
+    row["payment_terms"] = terms
+    row["business_code"] = code
+    return row
+
+
 def test_wrapper_orders_crossed_quantiles():
     # lower model returns a HIGHER value than upper -> must be swapped, not passed through
-    m = PaymentLatenessModel(_Stub(2.0), _Stub(9.0), _Stub(1.0))
-    df = pd.DataFrame([{c: 0.0 for c in FEATURE_COLS}])
-    out = m.predict(df)
+    m = PaymentLatenessModel(_Stub(2.0), _Stub(9.0), _Stub(1.0), ENCODERS)
+    out = m.predict(pd.DataFrame([_raw_row()]))
     assert out.days_late_lower.iloc[0] == 1.0
     assert out.days_late_upper.iloc[0] == 9.0
     assert (out.days_late_lower <= out.days_late_upper).all()
@@ -122,9 +131,35 @@ def test_wrapper_orders_crossed_quantiles():
 
 
 def test_wrapper_preserves_index():
-    m = PaymentLatenessModel(_Stub(1.0), _Stub(0.0), _Stub(2.0))
-    df = pd.DataFrame([{c: 0.0 for c in FEATURE_COLS} for _ in range(3)], index=[10, 20, 30])
+    m = PaymentLatenessModel(_Stub(1.0), _Stub(0.0), _Stub(2.0), ENCODERS)
+    df = pd.DataFrame([_raw_row() for _ in range(3)], index=[10, 20, 30])
     assert m.predict(df).index.tolist() == [10, 20, 30]
+
+
+def test_wrapper_encodes_internally():
+    """The model owns its category mapping. Callers pass raw strings; an unseen
+    category must degrade to -1 rather than raise."""
+    captured = {}
+
+    class _Capture:
+        def predict(self, X):
+            captured["X"] = X
+            return np.zeros(len(X))
+
+    m = PaymentLatenessModel(_Capture(), _Stub(0.0), _Stub(1.0), ENCODERS)
+    m.predict(pd.DataFrame([_raw_row("NAH4"), _raw_row("UNSEEN")]))
+
+    col = FEATURE_COLS.index("payment_terms_encoded")
+    assert captured["X"][0, col] == 1, "known category encoded wrongly"
+    assert captured["X"][1, col] == -1, "unseen category must map to -1, not raise"
+
+
+def test_raw_input_cols_cover_every_feature():
+    """Anything the model needs must be derivable from what callers are asked for."""
+    derived = {"payment_terms_encoded", "business_code_encoded"}
+    assert set(FEATURE_COLS) - derived <= set(RAW_INPUT_COLS)
+    assert "payment_terms" in RAW_INPUT_COLS and "business_code" in RAW_INPUT_COLS
+    assert not [c for c in RAW_INPUT_COLS if c.endswith("_encoded")], "raw input must not be pre-encoded"
 
 
 if __name__ == "__main__":

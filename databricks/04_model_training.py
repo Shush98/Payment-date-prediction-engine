@@ -47,8 +47,8 @@ from pyspark.sql import functions as F
 from sklearn.ensemble import GradientBoostingRegressor
 
 from config import Paths
-from modeling import (FEATURE_COLS, PaymentLatenessModel, apply_encoders, build_encoders,
-                      business_metrics, model_metrics)
+from modeling import (FEATURE_COLS, RAW_INPUT_COLS, PaymentLatenessModel, apply_encoders,
+                      build_encoders, business_metrics, model_metrics)
 from transforms import HIST_COLS, add_invoice_features, asof_join_history, build_customer_timeline
 
 P = Paths(dbutils.widgets.get("catalog"), dbutils.widgets.get("schema"))
@@ -163,7 +163,8 @@ with mlflow.start_run(run_name=f"gbm-quantile-{CUTOFF}") as run:
     model_lower = GradientBoostingRegressor(loss="quantile", alpha=0.1, **GBM).fit(X_train, y_train)
     model_upper = GradientBoostingRegressor(loss="quantile", alpha=0.9, **GBM).fit(X_train, y_train)
 
-    bundle = PaymentLatenessModel(model_mean, model_lower, model_upper)
+    # Encoders travel inside the model so inference never has to reproduce the mapping.
+    bundle = PaymentLatenessModel(model_mean, model_lower, model_upper, encoders)
     preds = bundle.predict(test_pdf)
 
     stats = model_metrics(y_test, preds.days_late_pred, preds.days_late_lower, preds.days_late_upper)
@@ -176,6 +177,10 @@ with mlflow.start_run(run_name=f"gbm-quantile-{CUTOFF}") as run:
         "n_train": len(X_train), "n_test": len(X_test),
         "n_features": len(FEATURE_COLS),
         "feature_source": "point_in_time_timeline_train_fold_only",
+        # Cold-start fallbacks must be reused at inference or customers with no history
+        # get different values than the model was trained with. Logged here so they are
+        # tied to this exact model version rather than recomputed downstream.
+        **{f"default_{k}": v for k, v in defaults.items()},
     })
     mlflow.log_metrics({**stats, **biz})
     mlflow.set_tags({
@@ -210,12 +215,14 @@ with mlflow.start_run(run_name=f"gbm-quantile-{CUTOFF}") as run:
         def predict(self, context, model_input):
             return self.bundle.predict(model_input)
 
-    signature = mlflow.models.infer_signature(test_pdf[FEATURE_COLS], preds)
+    # Signature is over RAW input (categoricals as strings), matching what the model
+    # actually accepts now that it encodes internally.
+    signature = mlflow.models.infer_signature(test_pdf[RAW_INPUT_COLS], preds)
     mlflow.pyfunc.log_model(
         artifact_path="model",
         python_model=PaymentLatenessPyfunc(bundle),
         signature=signature,
-        input_example=test_pdf[FEATURE_COLS].head(3),
+        input_example=test_pdf[RAW_INPUT_COLS].head(3),
         registered_model_name=MODEL_NAME if REGISTER else None,
         pip_requirements=["scikit-learn", "pandas", "numpy"],
     )
@@ -287,11 +294,14 @@ if REGISTER:
 
 if REGISTER:
     loaded = mlflow.pyfunc.load_model(f"models:/{MODEL_NAME}@champion")
-    sample = test_pdf[FEATURE_COLS].head(5)
+    sample = test_pdf[RAW_INPUT_COLS].head(5)      # raw categoricals - model encodes them
     out = loaded.predict(sample)
     print(out)
     assert (out["days_late_lower"] <= out["days_late_upper"]).all(), "interval inverted after round-trip"
-    print("\nround-trip OK")
+    # The reloaded model must agree with the in-memory one, or the encoders did not survive.
+    assert np.allclose(out["days_late_pred"].to_numpy(),
+                       preds["days_late_pred"].head(5).to_numpy()), "encoders lost in serialization"
+    print("\nround-trip OK - predictions identical after reload")
 
 # COMMAND ----------
 

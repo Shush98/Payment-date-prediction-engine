@@ -26,6 +26,18 @@ FEATURE_COLS = [
     "cust_avg_amount",
 ]
 
+# What the registered model expects as input: the numeric features plus the two
+# categoricals as RAW strings. The model encodes them itself, so callers never have to
+# reproduce the mapping.
+RAW_INPUT_COLS = [c for c in FEATURE_COLS if not c.endswith("_encoded")] + \
+                 ["payment_terms", "business_code"]
+
+# Cold-start fallbacks are fitted on the train fold and must be reused at inference, or
+# customers with no history get different values than the model was trained with. They
+# are logged as MLflow params (default_*) so they travel with the model version.
+DEFAULT_KEYS = ["cust_avg_days_late", "cust_std_days_late", "cust_invoice_count",
+                "cust_min_late", "cust_max_late", "cust_avg_amount"]
+
 # Mirrors deploy/src/decision.py. Duplicated rather than imported so this module has no
 # dependency on the Flask app's layout; test_modeling.py asserts the two stay in sync.
 CALL_COST = 15.0
@@ -155,24 +167,30 @@ def business_metrics(df: pd.DataFrame, lower, upper, capacity=DAILY_CAPACITY) ->
 
 
 class PaymentLatenessModel:
-    """Bundles the three quantile models behind one predict() call.
+    """Bundles the three quantile models *and their encoders* behind one predict() call.
 
-    Registered to Unity Catalog as a single mlflow.pyfunc model. The decision engine
-    needs the interval as well as the point estimate, so shipping three separate
-    registered models would push reassembly onto every caller.
+    Registered to Unity Catalog as a single mlflow.pyfunc model. Two reasons it owns
+    the encoding rather than expecting pre-encoded input:
+
+    - The decision engine needs the interval as well as the point estimate, so three
+      separately registered models would push reassembly onto every caller.
+    - A model that requires callers to reproduce its category->code mapping is a
+      train/serve skew waiting to happen. Inference passes raw `payment_terms` and
+      `business_code`; the model applies the mapping it was fitted with.
 
     Wrapped as an mlflow.pyfunc.PythonModel in the notebook; kept framework-free here
     so it can be tested without mlflow installed.
     """
 
-    def __init__(self, model_mean, model_lower, model_upper, feature_cols=FEATURE_COLS):
+    def __init__(self, model_mean, model_lower, model_upper, encoders, feature_cols=FEATURE_COLS):
         self.model_mean = model_mean
         self.model_lower = model_lower
         self.model_upper = model_upper
+        self.encoders = encoders
         self.feature_cols = list(feature_cols)
 
     def predict(self, df: pd.DataFrame) -> pd.DataFrame:
-        X = df[self.feature_cols].to_numpy()
+        X = apply_encoders(df, self.encoders)[self.feature_cols].to_numpy()
         lower = self.model_lower.predict(X)
         upper = self.model_upper.predict(X)
         # A quantile pair can cross on hard rows; an inverted interval would make
