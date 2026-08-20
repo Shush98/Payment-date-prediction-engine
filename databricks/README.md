@@ -16,6 +16,34 @@ Gold aggregates → **point-in-time feature table**.
 | 6 | `05_batch_inference.py` | Scores the open book into an append-only prediction log |
 | 7 | `06_decision_engine.py` | EV ranking + capacity constraint → collection queue |
 | 8 | `07_monitoring.py` | Delayed-label join, performance after outcomes, PSI drift |
+| 9 | `08_dashboard.sql` | Creates the 10 views the AI/BI dashboard reads. Run in SQL Editor |
+
+## Building the dashboard (Phase 9)
+
+Run `08_dashboard.sql` in the **SQL Editor** first — it creates ten `v_*` views. The
+dashboard then only ever selects from those, so definitions stay versioned in git rather
+than buried in widget config, and every widget agrees on what "high risk" means.
+
+Then: sidebar → **Dashboards** → **Create dashboard** → **Data** tab → add a dataset per
+view (`SELECT * FROM workspace.payment_ops.v_executive_kpis`, etc.) → **Canvas** tab to
+place widgets.
+
+Suggested layout:
+
+| Page | Widgets | View |
+|---|---|---|
+| Operations | 6 counter tiles | `v_executive_kpis` |
+| | Table — today's work order | `v_collection_queue` |
+| | Bar: exposure by tier | `v_action_summary` |
+| Impact | Bar: 3 strategies | `v_strategy_comparison` |
+| | Scatter: avg late vs variability, coloured by segment | `v_customer_segments` |
+| Model | Line: PI coverage over time (add an 80% reference) | `v_model_performance` |
+| | Bar: PSI by feature, coloured by status | `v_drift_latest` |
+| | Table: quality per run | `v_pipeline_health` |
+
+`pi_coverage_pct` against an 80% reference line is the most valuable single chart: the
+decision engine derives `P(late)` from the interval, so coverage drift degrades the
+ranking in a way a MAE-only view never shows.
 
 Re-run 1→4 to add more data. Steps 2–4 are idempotent; step 2 adds zero rows if no new files
 arrived, which is the checkpoint working.
