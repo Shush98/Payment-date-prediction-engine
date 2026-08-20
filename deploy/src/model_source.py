@@ -47,9 +47,15 @@ class Predictor:
     version: str
     score: Callable[[pd.DataFrame], pd.DataFrame] = field(repr=False)
     detail: str = ""
+    # Why the Unity Catalog path was not used. Exposed on /health so diagnosing a
+    # fallback does not mean digging through the host's log tab.
+    fallback_reason: str = ""
 
     def as_dict(self):
-        return {"source": self.source, "version": self.version, "detail": self.detail}
+        out = {"source": self.source, "version": self.version, "detail": self.detail}
+        if self.fallback_reason:
+            out["fallback_reason"] = self.fallback_reason
+        return out
 
 
 def _uc_payload(enriched: pd.DataFrame) -> pd.DataFrame:
@@ -60,10 +66,12 @@ def _uc_payload(enriched: pd.DataFrame) -> pd.DataFrame:
     return payload[UC_INPUT_COLS]
 
 
-def _load_unity_catalog(model_name: str, alias: str) -> Optional[Predictor]:
-    """Returns None (rather than raising) so the caller can fall back cleanly."""
-    if not (os.getenv("DATABRICKS_HOST") and os.getenv("DATABRICKS_TOKEN")):
-        return None
+def _load_unity_catalog(model_name: str, alias: str):
+    """Returns (Predictor, "") on success, or (None, reason) so the caller can fall back
+    cleanly AND report why. Never raises - a public demo must not 500 on startup."""
+    missing = [v for v in ("DATABRICKS_HOST", "DATABRICKS_TOKEN") if not os.getenv(v)]
+    if missing:
+        return None, f"{' and '.join(missing)} not set"
     try:
         import mlflow
         from mlflow.tracking import MlflowClient
@@ -85,11 +93,12 @@ def _load_unity_catalog(model_name: str, alias: str) -> Optional[Predictor]:
                 "days_late_upper": np.asarray(out["days_late_upper"], dtype=float),
             }, index=enriched.index)
 
-        return Predictor("unity_catalog", str(version), score, detail=uri)
+        return Predictor("unity_catalog", str(version), score, detail=uri), ""
     except Exception as e:                      # noqa: BLE001 - any failure must fall back
-        warnings.warn(f"Unity Catalog model unavailable ({type(e).__name__}: {e}); "
+        reason = f"{type(e).__name__}: {e}"
+        warnings.warn(f"Unity Catalog model unavailable ({reason}); "
                       "falling back to local artifacts")
-        return None
+        return None, reason
 
 
 def _load_local(models: dict) -> Predictor:
@@ -112,4 +121,11 @@ def load_predictor(models: dict,
     """Unity Catalog first, local artifacts if it is not reachable."""
     model_name = model_name or os.getenv("UC_MODEL_NAME", DEFAULT_MODEL_NAME)
     alias = alias or os.getenv("UC_MODEL_ALIAS", DEFAULT_ALIAS)
-    return _load_unity_catalog(model_name, alias) or _load_local(models)
+
+    uc, reason = _load_unity_catalog(model_name, alias)
+    if uc is not None:
+        return uc
+
+    local = _load_local(models)
+    local.fallback_reason = f"{model_name}@{alias} -> {reason}"
+    return local

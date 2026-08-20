@@ -70,6 +70,10 @@ def test_falls_back_to_local_without_credentials(monkeypatch_env=None):
         p = load_predictor(models)
         assert p.source == "local_artifacts", p.source
         assert p.version == "bundled"
+        # The reason must name the missing variables, so /health explains itself.
+        assert "DATABRICKS_HOST" in p.fallback_reason, p.fallback_reason
+        assert "DATABRICKS_TOKEN" in p.fallback_reason, p.fallback_reason
+        assert "fallback_reason" in p.as_dict()
     finally:
         for k, v in saved.items():
             if v is not None:
