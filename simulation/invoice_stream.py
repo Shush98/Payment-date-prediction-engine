@@ -16,9 +16,12 @@
 
 dbutils.widgets.text("catalog", "workspace")
 dbutils.widgets.text("schema", "payment_ops")
-dbutils.widgets.text("batches", "5")
-dbutils.widgets.text("batch_size", "500")
-dbutils.widgets.text("sleep_seconds", "2")
+# Defaults cover the whole 50k source. Invoices are emitted in posting-date order and
+# the ~10k OPEN ones are the most recent, so a short run emits only closed invoices and
+# leaves inference with nothing to score.
+dbutils.widgets.text("batches", "10")
+dbutils.widgets.text("batch_size", "5000")
+dbutils.widgets.text("sleep_seconds", "1")
 dbutils.widgets.text("duplicate_rate", "0.02")
 dbutils.widgets.text("corrupt_rate", "0.01")
 dbutils.widgets.text("reset", "false")
@@ -134,6 +137,19 @@ def corrupt(ev):
 
 # COMMAND ----------
 
+# The generator is stateless - every run starts from row 0 of the source. Re-running it
+# re-emits the same invoices with the same deterministic _event_id, which Silver dedupes.
+covered = min(BATCHES * BATCH_SIZE, len(src))
+open_in_range = int(src.iloc[:covered].isOpen.eq(1).sum())
+print(f"will emit {covered:,} of {len(src):,} invoices "
+      f"({open_in_range:,} open, {covered - open_in_range:,} closed)")
+if open_in_range == 0:
+    print("\nWARNING: no OPEN invoices in this range - 05_batch_inference will have nothing "
+          f"to score.\nOpen invoices are the most recent; raise batches x batch_size above "
+          f"~{int(src.isOpen.eq(0).sum()):,} to reach them.")
+
+# COMMAND ----------
+
 cursor = 0
 for b in range(BATCHES):
     chunk = src.iloc[cursor:cursor + BATCH_SIZE]
@@ -165,7 +181,13 @@ for b in range(BATCHES):
     if b < BATCHES - 1:
         time.sleep(SLEEP)
 
-print(f"\ndone. {cursor:,} source invoices emitted.")
+emitted = src.iloc[:min(cursor, len(src))]
+print(f"\ndone. {len(emitted):,} source invoices emitted"
+      f"  ({int(emitted.isOpen.eq(1).sum()):,} open / {int(emitted.isOpen.eq(0).sum()):,} closed)")
+print(f"  posting dates: {emitted.posting_date.min().date()} .. {emitted.posting_date.max().date()}")
+assert emitted.isOpen.eq(1).sum() > 0, (
+    "no open invoices emitted - raise batches x batch_size so the run reaches the "
+    "most recent invoices, otherwise there is nothing for inference to score")
 
 # COMMAND ----------
 
